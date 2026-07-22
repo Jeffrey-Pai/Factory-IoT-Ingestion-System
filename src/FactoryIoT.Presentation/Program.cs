@@ -29,8 +29,9 @@ var rabbitHost = builder.Configuration.GetValue<string>("RabbitMQ:Host")
     ?? "localhost";
 builder.Services.AddSingleton(new RabbitMqConfig { Host = rabbitHost });
 
-// Register background worker
-builder.Services.AddHostedService<TelemetryIngestionWorker>();
+// Register background worker as singleton to enable health checks
+builder.Services.AddSingleton<TelemetryIngestionWorker>();
+builder.Services.AddHostedService(sp => sp.GetRequiredService<TelemetryIngestionWorker>());
 
 var app = builder.Build();
 
@@ -38,7 +39,19 @@ var app = builder.Build();
 using (var scope = app.Services.CreateScope())
 {
     var dbContext = scope.ServiceProvider.GetRequiredService<FactoryIoTDbContext>();
-    await dbContext.Database.MigrateAsync();
+    var logger = scope.ServiceProvider.GetRequiredService<ILogger<Program>>();
+    
+    try
+    {
+        logger.LogInformation("Running database migrations...");
+        await dbContext.Database.MigrateAsync();
+        logger.LogInformation("Database migrations completed successfully");
+    }
+    catch (Exception ex)
+    {
+        logger.LogError(ex, "Failed to run database migrations");
+        throw;
+    }
 }
 
 if (app.Environment.IsDevelopment())
@@ -54,6 +67,29 @@ app.MapMetrics();
 app.MapGet("/health", () => Results.Ok(new { status = "healthy" }))
     .WithName("HealthCheck")
     .WithOpenApi();
+
+// Enhanced health check for worker status
+app.MapGet("/health/worker", (TelemetryIngestionWorker worker) =>
+{
+    var status = new
+    {
+        isHealthy = worker.IsHealthy,
+        lastMessageReceived = worker.LastMessageReceived,
+        lastBatchFlushed = worker.LastBatchFlushed,
+        timeSinceLastMessage = worker.LastMessageReceived.HasValue 
+            ? DateTimeOffset.UtcNow - worker.LastMessageReceived.Value 
+            : (TimeSpan?)null,
+        timeSinceLastFlush = worker.LastBatchFlushed.HasValue 
+            ? DateTimeOffset.UtcNow - worker.LastBatchFlushed.Value 
+            : (TimeSpan?)null
+    };
+    
+    return worker.IsHealthy 
+        ? Results.Ok(status) 
+        : Results.Json(status, statusCode: 503);
+})
+.WithName("WorkerHealthCheck")
+.WithOpenApi();
 
 // Telemetry API endpoint
 app.MapGet("/api/v1/telemetry/{machineId}/latest", async (
