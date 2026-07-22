@@ -13,7 +13,7 @@ namespace FactoryIoT.Infrastructure.Workers;
 
 /// <summary>
 /// Background worker that consumes telemetry from RabbitMQ, buffers using Channels,
-/// and bulk inserts to PostgreSQL. Tracks metrics with prometheus-net.
+/// and bulk inserts to MSSQL. Tracks metrics with prometheus-net.
 /// </summary>
 public sealed class TelemetryIngestionWorker : BackgroundService
 {
@@ -23,6 +23,14 @@ public sealed class TelemetryIngestionWorker : BackgroundService
     private static readonly Counter TelemetriesWrittenCounter = Metrics.CreateCounter(
         "telemetry_written_total",
         "Total number of telemetry records written to database");
+
+    private static readonly Counter TelemetriesConsumedCounter = Metrics.CreateCounter(
+        "telemetry_consumed_total",
+        "Total number of telemetry messages consumed from RabbitMQ");
+
+    private static readonly Counter TelemetriesFailedCounter = Metrics.CreateCounter(
+        "telemetry_failed_total",
+        "Total number of telemetry records that failed to save");
 
     private static readonly Histogram BatchProcessingHistogram = Metrics.CreateHistogram(
         "telemetry_batch_processing_seconds",
@@ -34,6 +42,16 @@ public sealed class TelemetryIngestionWorker : BackgroundService
     private readonly ILoggerFactory _loggerFactory;
     private readonly Channel<Telemetry> _channel;
     private ITelemetryConsumer? _consumer;
+    
+    // Health status tracking
+    private bool _isConnected;
+    private bool _isProcessing;
+    private DateTimeOffset? _lastMessageReceived;
+    private DateTimeOffset? _lastBatchFlushed;
+    
+    public bool IsHealthy => _isConnected && _isProcessing;
+    public DateTimeOffset? LastMessageReceived => _lastMessageReceived;
+    public DateTimeOffset? LastBatchFlushed => _lastBatchFlushed;
 
     public TelemetryIngestionWorker(
         RabbitMqConfig rabbitConfig,
@@ -55,6 +73,20 @@ public sealed class TelemetryIngestionWorker : BackgroundService
     protected override async Task ExecuteAsync(CancellationToken stoppingToken)
     {
         _logger.LogInformation("Telemetry Ingestion Worker starting...");
+        _logger.LogInformation("RabbitMQ Host: {RabbitMqHost}", _rabbitConfig.Host);
+
+        // Verify database connection before starting
+        try
+        {
+            using var scope = _scopeFactory.CreateScope();
+            var dbContext = scope.ServiceProvider.GetRequiredService<FactoryIoT.Infrastructure.Persistence.FactoryIoTDbContext>();
+            await dbContext.Database.CanConnectAsync(stoppingToken);
+            _logger.LogInformation("Database connection verified successfully");
+        }
+        catch (Exception ex)
+        {
+            _logger.LogError(ex, "Failed to connect to database. Worker will still start but writes may fail.");
+        }
 
         // Create RabbitMQ consumer with retry logic
         const int maxRetries = 10;
@@ -65,7 +97,8 @@ public sealed class TelemetryIngestionWorker : BackgroundService
                 _logger.LogInformation("Attempting to connect to RabbitMQ (attempt {Attempt}/{MaxRetries})...", attempt, maxRetries);
                 var consumerLogger = _loggerFactory.CreateLogger<RabbitMqTelemetryConsumer>();
                 _consumer = await RabbitMqTelemetryConsumer.CreateAsync(_rabbitConfig.Host, consumerLogger, stoppingToken);
-                _logger.LogInformation("Successfully connected to RabbitMQ.");
+                _isConnected = true;
+                _logger.LogInformation("Successfully connected to RabbitMQ at {Host}", _rabbitConfig.Host);
                 break;
             }
             catch (Exception ex)
@@ -82,14 +115,27 @@ public sealed class TelemetryIngestionWorker : BackgroundService
         }
 
         // Start consuming from RabbitMQ
+        _logger.LogInformation("Starting RabbitMQ consumer...");
         await _consumer!.StartAsync(OnTelemetryReceivedAsync, stoppingToken);
+        _logger.LogInformation("RabbitMQ consumer started successfully");
 
         // Start batch processor
+        _isProcessing = true;
+        _logger.LogInformation("Starting batch processor...");
         await ProcessBatchesAsync(stoppingToken);
     }
 
     private async Task OnTelemetryReceivedAsync(Telemetry telemetry)
     {
+        TelemetriesConsumedCounter.Inc();
+        _lastMessageReceived = DateTimeOffset.UtcNow;
+        
+        if (_logger.IsEnabled(LogLevel.Debug))
+        {
+            _logger.LogDebug("Received telemetry from {MachineId}: Temp={Temperature}, Pressure={Pressure}, Status={Status}", 
+                telemetry.MachineId, telemetry.Temperature, telemetry.Pressure, telemetry.Status);
+        }
+        
         await _channel.Writer.WriteAsync(telemetry);
     }
 
@@ -97,6 +143,9 @@ public sealed class TelemetryIngestionWorker : BackgroundService
     {
         var batch = new List<Telemetry>(BatchSize);
         var batchTimer = new PeriodicTimer(BatchInterval);
+        
+        _logger.LogInformation("Batch processor running. Batch size: {BatchSize}, Interval: {BatchInterval}s", 
+            BatchSize, BatchInterval.TotalSeconds);
 
         try
         {
@@ -121,6 +170,7 @@ public sealed class TelemetryIngestionWorker : BackgroundService
                     // If batch is full, flush immediately
                     if (batch.Count >= BatchSize)
                     {
+                        _logger.LogInformation("Batch full ({Count} items), flushing to database...", batch.Count);
                         await FlushBatchAsync(batch, stoppingToken);
                         batch.Clear();
                     }
@@ -130,6 +180,7 @@ public sealed class TelemetryIngestionWorker : BackgroundService
                     // Timer elapsed, flush if we have any data
                     if (batch.Count > 0)
                     {
+                        _logger.LogInformation("Batch timer elapsed, flushing {Count} items to database...", batch.Count);
                         await FlushBatchAsync(batch, stoppingToken);
                         batch.Clear();
                     }
@@ -139,6 +190,7 @@ public sealed class TelemetryIngestionWorker : BackgroundService
             // Final flush on shutdown
             if (batch.Count > 0)
             {
+                _logger.LogInformation("Shutdown - flushing final batch of {Count} items", batch.Count);
                 await FlushBatchAsync(batch, stoppingToken);
             }
         }
@@ -149,6 +201,7 @@ public sealed class TelemetryIngestionWorker : BackgroundService
         catch (Exception ex)
         {
             _logger.LogError(ex, "Error in batch processing loop.");
+            _isProcessing = false;
         }
     }
 
@@ -166,25 +219,28 @@ public sealed class TelemetryIngestionWorker : BackgroundService
                 using var scope = _scopeFactory.CreateScope();
                 var repository = scope.ServiceProvider.GetRequiredService<ITelemetryRepository>();
                 
+                _logger.LogDebug("Saving batch of {Count} telemetry records to database (attempt {Attempt})...", batch.Count, attempt);
                 await repository.AddRangeAsync(batch, cancellationToken);
                 stopwatch.Stop();
 
                 TelemetriesWrittenCounter.Inc(batch.Count);
                 BatchProcessingHistogram.Observe(stopwatch.Elapsed.TotalSeconds);
+                _lastBatchFlushed = DateTimeOffset.UtcNow;
 
-                _logger.LogInformation("Flushed {Count} telemetry records in {ElapsedMs}ms", 
+                _logger.LogInformation("✓ Successfully saved {Count} telemetry records to MSSQL in {ElapsedMs}ms", 
                     batch.Count, stopwatch.ElapsedMilliseconds);
                 return; // Success, exit retry loop
             }
             catch (Exception ex)
             {
-                _logger.LogError(ex, "Failed to flush batch of {Count} telemetry records (attempt {Attempt}/{MaxRetries})", 
+                _logger.LogError(ex, "✗ Failed to save batch of {Count} telemetry records (attempt {Attempt}/{MaxRetries})", 
                     batch.Count, attempt, maxRetries);
                 
                 if (attempt >= maxRetries)
                 {
                     stopwatch.Stop();
-                    _logger.LogCritical("Failed to flush batch after {MaxRetries} attempts. Data loss may occur for {Count} records.", 
+                    TelemetriesFailedCounter.Inc(batch.Count);
+                    _logger.LogCritical("✗✗✗ CRITICAL: Failed to save batch after {MaxRetries} attempts. DATA LOSS for {Count} records! ✗✗✗", 
                         maxRetries, batch.Count);
                     break;
                 }
@@ -198,6 +254,9 @@ public sealed class TelemetryIngestionWorker : BackgroundService
     public override async Task StopAsync(CancellationToken cancellationToken)
     {
         _logger.LogInformation("Stopping Telemetry Ingestion Worker...");
+        _isProcessing = false;
+        _isConnected = false;
+        
         if (_consumer != null)
         {
             await _consumer.StopAsync(cancellationToken);
