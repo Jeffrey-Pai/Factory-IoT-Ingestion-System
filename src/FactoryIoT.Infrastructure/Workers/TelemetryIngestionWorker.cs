@@ -31,17 +31,20 @@ public sealed class TelemetryIngestionWorker : BackgroundService
     private readonly RabbitMqConfig _rabbitConfig;
     private readonly IServiceScopeFactory _scopeFactory;
     private readonly ILogger<TelemetryIngestionWorker> _logger;
+    private readonly ILoggerFactory _loggerFactory;
     private readonly Channel<Telemetry> _channel;
     private ITelemetryConsumer? _consumer;
 
     public TelemetryIngestionWorker(
         RabbitMqConfig rabbitConfig,
         IServiceScopeFactory scopeFactory,
-        ILogger<TelemetryIngestionWorker> logger)
+        ILogger<TelemetryIngestionWorker> logger,
+        ILoggerFactory loggerFactory)
     {
         _rabbitConfig = rabbitConfig;
         _scopeFactory = scopeFactory;
         _logger = logger;
+        _loggerFactory = loggerFactory;
         _channel = Channel.CreateUnbounded<Telemetry>(new UnboundedChannelOptions
         {
             SingleReader = true,
@@ -60,7 +63,8 @@ public sealed class TelemetryIngestionWorker : BackgroundService
             try
             {
                 _logger.LogInformation("Attempting to connect to RabbitMQ (attempt {Attempt}/{MaxRetries})...", attempt, maxRetries);
-                _consumer = await RabbitMqTelemetryConsumer.CreateAsync(_rabbitConfig.Host, stoppingToken);
+                var consumerLogger = _loggerFactory.CreateLogger<RabbitMqTelemetryConsumer>();
+                _consumer = await RabbitMqTelemetryConsumer.CreateAsync(_rabbitConfig.Host, consumerLogger, stoppingToken);
                 _logger.LogInformation("Successfully connected to RabbitMQ.");
                 break;
             }
