@@ -9,7 +9,7 @@
 
 ### 1. 啟動基礎設施與服務
 
-啟動所有服務（RabbitMQ、PostgreSQL、Prometheus、Grafana、Backend API、Simulator）：
+啟動所有服務（RabbitMQ、SQL Server、Prometheus、Grafana、Backend API、Simulator）：
 
 ```bash
 docker-compose up -d
@@ -24,6 +24,7 @@ docker-compose ps
 ### 2. 驗證服務運行
 
 - **RabbitMQ Management UI**: http://localhost:15672 (帳號/密碼: `guest`/`guest`)
+- **SQL Server**: localhost,1433 (帳號/密碼: `sa`/`IoT_Secret123!`) - 可使用 SSMS 管理
 - **Backend API Health**: http://localhost:8080/health
 - **Backend API Swagger**: http://localhost:8080/swagger (開發環境)
 - **Prometheus**: http://localhost:9090
@@ -133,9 +134,19 @@ vus............................: 50      min=50  max=50
 - **Backend API** (ASP.NET Core): 提供 REST API 與 Prometheus metrics
 - **Simulator**: 多執行緒模擬 50+ 台設備發送遙測數據
 - **RabbitMQ**: 訊息佇列，處理遙測數據
-- **PostgreSQL**: 儲存遙測數據
+- **SQL Server**: 儲存遙測數據
 - **Prometheus**: 收集 metrics
 - **Grafana**: 視覺化監控儀表板
+
+## 🔧 使用 SQL Server Management Studio (SSMS)
+
+您可以使用 SSMS 連接到 SQL Server 容器：
+
+- **伺服器名稱**: `localhost,1433`
+- **驗證方式**: SQL Server 驗證
+- **登入**: `sa`
+- **密碼**: `IoT_Secret123!`
+- **資料庫**: `factory_iot`
 
 ## 🛑 停止服務
 
@@ -143,7 +154,7 @@ vus............................: 50      min=50  max=50
 docker-compose down
 ```
 
-保留資料卷（RabbitMQ、PostgreSQL、Prometheus、Grafana 數據）。
+保留資料卷（RabbitMQ、SQL Server、Prometheus、Grafana 數據）。
 
 若要完全清除所有資料：
 

@@ -24,20 +24,20 @@ services:
   # ──────────────────────────────────────────────
   # Relational Database
   # ──────────────────────────────────────────────
-  postgres:
-    image: postgres:16-alpine
-    container_name: postgres
+  mssql:
+    image: mcr.microsoft.com/mssql/server:2022-latest
+    container_name: mssql
     restart: unless-stopped
     environment:
-      POSTGRES_USER: iot
-      POSTGRES_PASSWORD: iot_secret
-      POSTGRES_DB: factory_iot
+      ACCEPT_EULA: Y
+      MSSQL_SA_PASSWORD: IoT_Secret123!
+      MSSQL_PID: Express
     ports:
-      - "5432:5432"
+      - "1433:1433"
     volumes:
-      - postgres_data:/var/lib/postgresql/data
+      - mssql_data:/var/opt/mssql
     healthcheck:
-      test: ["CMD-SHELL", "pg_isready -U iot -d factory_iot"]
+      test: ["CMD", "/opt/mssql-tools18/bin/sqlcmd", "-S", "localhost", "-U", "sa", "-P", "IoT_Secret123!", "-Q", "SELECT 1", "-C"]
       interval: 10s
       timeout: 5s
       retries: 5
@@ -92,11 +92,11 @@ services:
       ASPNETCORE_ENVIRONMENT: Production
       ASPNETCORE_URLS: http://+:8080
       RABBITMQ_HOST: rabbitmq
-      ConnectionStrings__Default: "Host=postgres;Port=5432;Database=factory_iot;Username=iot;Password=${POSTGRES_PASSWORD:-iot_secret}"
+      ConnectionStrings__Default: "Server=mssql,1433;Database=factory_iot;User Id=sa;******;TrustServerCertificate=True"
     depends_on:
       rabbitmq:
         condition: service_healthy
-      postgres:
+      mssql:
         condition: service_healthy
 
   # ──────────────────────────────────────────────
@@ -116,6 +116,6 @@ services:
 
 volumes:
   rabbitmq_data:
-  postgres_data:
+  mssql_data:
   prometheus_data:
   grafana_data:

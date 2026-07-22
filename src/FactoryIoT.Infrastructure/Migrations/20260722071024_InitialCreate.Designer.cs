@@ -3,16 +3,16 @@ using System;
 using FactoryIoT.Infrastructure.Persistence;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.EntityFrameworkCore.Infrastructure;
+using Microsoft.EntityFrameworkCore.Metadata;
 using Microsoft.EntityFrameworkCore.Migrations;
 using Microsoft.EntityFrameworkCore.Storage.ValueConversion;
-using Npgsql.EntityFrameworkCore.PostgreSQL.Metadata;
 
 #nullable disable
 
 namespace FactoryIoT.Infrastructure.Migrations
 {
     [DbContext(typeof(FactoryIoTDbContext))]
-    [Migration("20260722054529_InitialCreate")]
+    [Migration("20260722071024_InitialCreate")]
     partial class InitialCreate
     {
         /// <inheritdoc />
@@ -21,36 +21,36 @@ namespace FactoryIoT.Infrastructure.Migrations
 #pragma warning disable 612, 618
             modelBuilder
                 .HasAnnotation("ProductVersion", "8.0.4")
-                .HasAnnotation("Relational:MaxIdentifierLength", 63);
+                .HasAnnotation("Relational:MaxIdentifierLength", 128);
 
-            NpgsqlModelBuilderExtensions.UseIdentityByDefaultColumns(modelBuilder);
+            SqlServerModelBuilderExtensions.UseIdentityColumns(modelBuilder);
 
             modelBuilder.Entity("FactoryIoT.Domain.Entities.SensorReading", b =>
                 {
                     b.Property<Guid>("Id")
                         .ValueGeneratedOnAdd()
-                        .HasColumnType("uuid");
+                        .HasColumnType("uniqueidentifier");
 
                     b.Property<string>("MachineId")
                         .IsRequired()
                         .HasMaxLength(50)
-                        .HasColumnType("character varying(50)");
+                        .HasColumnType("nvarchar(50)");
 
                     b.Property<string>("SensorType")
                         .IsRequired()
                         .HasMaxLength(50)
-                        .HasColumnType("character varying(50)");
+                        .HasColumnType("nvarchar(50)");
 
                     b.Property<DateTimeOffset>("Timestamp")
-                        .HasColumnType("timestamp with time zone");
+                        .HasColumnType("datetimeoffset");
 
                     b.Property<string>("Unit")
                         .IsRequired()
                         .HasMaxLength(20)
-                        .HasColumnType("character varying(20)");
+                        .HasColumnType("nvarchar(20)");
 
                     b.Property<double>("Value")
-                        .HasColumnType("double precision");
+                        .HasColumnType("float");
 
                     b.HasKey("Id");
 
@@ -63,26 +63,26 @@ namespace FactoryIoT.Infrastructure.Migrations
                 {
                     b.Property<Guid>("Id")
                         .ValueGeneratedOnAdd()
-                        .HasColumnType("uuid");
+                        .HasColumnType("uniqueidentifier");
 
                     b.Property<string>("MachineId")
                         .IsRequired()
                         .HasMaxLength(50)
-                        .HasColumnType("character varying(50)");
+                        .HasColumnType("nvarchar(50)");
 
                     b.Property<double>("Pressure")
-                        .HasColumnType("double precision");
+                        .HasColumnType("float");
 
                     b.Property<string>("Status")
                         .IsRequired()
                         .HasMaxLength(50)
-                        .HasColumnType("character varying(50)");
+                        .HasColumnType("nvarchar(50)");
 
                     b.Property<double>("Temperature")
-                        .HasColumnType("double precision");
+                        .HasColumnType("float");
 
                     b.Property<DateTimeOffset>("Timestamp")
-                        .HasColumnType("timestamp with time zone");
+                        .HasColumnType("datetimeoffset");
 
                     b.HasKey("Id");
 

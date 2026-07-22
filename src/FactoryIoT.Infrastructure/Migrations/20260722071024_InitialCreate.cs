@@ -15,12 +15,12 @@ namespace FactoryIoT.Infrastructure.Migrations
                 name: "SensorReadings",
                 columns: table => new
                 {
-                    Id = table.Column<Guid>(type: "uuid", nullable: false),
-                    MachineId = table.Column<string>(type: "character varying(50)", maxLength: 50, nullable: false),
-                    SensorType = table.Column<string>(type: "character varying(50)", maxLength: 50, nullable: false),
-                    Value = table.Column<double>(type: "double precision", nullable: false),
-                    Unit = table.Column<string>(type: "character varying(20)", maxLength: 20, nullable: false),
-                    Timestamp = table.Column<DateTimeOffset>(type: "timestamp with time zone", nullable: false)
+                    Id = table.Column<Guid>(type: "uniqueidentifier", nullable: false),
+                    MachineId = table.Column<string>(type: "nvarchar(50)", maxLength: 50, nullable: false),
+                    SensorType = table.Column<string>(type: "nvarchar(50)", maxLength: 50, nullable: false),
+                    Value = table.Column<double>(type: "float", nullable: false),
+                    Unit = table.Column<string>(type: "nvarchar(20)", maxLength: 20, nullable: false),
+                    Timestamp = table.Column<DateTimeOffset>(type: "datetimeoffset", nullable: false)
                 },
                 constraints: table =>
                 {
@@ -31,12 +31,12 @@ namespace FactoryIoT.Infrastructure.Migrations
                 name: "Telemetries",
                 columns: table => new
                 {
-                    Id = table.Column<Guid>(type: "uuid", nullable: false),
-                    MachineId = table.Column<string>(type: "character varying(50)", maxLength: 50, nullable: false),
-                    Temperature = table.Column<double>(type: "double precision", nullable: false),
-                    Pressure = table.Column<double>(type: "double precision", nullable: false),
-                    Status = table.Column<string>(type: "character varying(50)", maxLength: 50, nullable: false),
-                    Timestamp = table.Column<DateTimeOffset>(type: "timestamp with time zone", nullable: false)
+                    Id = table.Column<Guid>(type: "uniqueidentifier", nullable: false),
+                    MachineId = table.Column<string>(type: "nvarchar(50)", maxLength: 50, nullable: false),
+                    Temperature = table.Column<double>(type: "float", nullable: false),
+                    Pressure = table.Column<double>(type: "float", nullable: false),
+                    Status = table.Column<string>(type: "nvarchar(50)", maxLength: 50, nullable: false),
+                    Timestamp = table.Column<DateTimeOffset>(type: "datetimeoffset", nullable: false)
                 },
                 constraints: table =>
                 {
