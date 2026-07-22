@@ -14,11 +14,11 @@ builder.Services.AddSwaggerGen();
 // Register Prometheus HTTP metrics collection
 builder.Services.AddHttpClient();
 
-// Configure PostgreSQL with EF Core
+// Configure SQL Server with EF Core
 var connectionString = builder.Configuration.GetConnectionString("Default")
     ?? throw new InvalidOperationException("Connection string 'Default' not found.");
 builder.Services.AddDbContext<FactoryIoTDbContext>(options =>
-    options.UseNpgsql(connectionString));
+    options.UseSqlServer(connectionString));
 
 // Register repositories
 builder.Services.AddScoped<ITelemetryRepository, TelemetryRepository>();
