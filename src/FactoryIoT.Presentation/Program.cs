@@ -23,12 +23,11 @@ builder.Services.AddDbContext<FactoryIoTDbContext>(options =>
 // Register repositories
 builder.Services.AddScoped<ITelemetryRepository, TelemetryRepository>();
 
-// Register RabbitMQ consumer as singleton
+// Register RabbitMQ host configuration
 var rabbitHost = builder.Configuration.GetValue<string>("RabbitMQ:Host") 
     ?? Environment.GetEnvironmentVariable("RABBITMQ_HOST") 
     ?? "localhost";
-builder.Services.AddSingleton<ITelemetryConsumer>(sp =>
-    RabbitMqTelemetryConsumer.CreateAsync(rabbitHost).GetAwaiter().GetResult());
+builder.Services.AddSingleton(new RabbitMqConfig { Host = rabbitHost });
 
 // Register background worker
 builder.Services.AddHostedService<TelemetryIngestionWorker>();
