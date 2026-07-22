@@ -3,6 +3,7 @@ using System.Threading.Channels;
 using FactoryIoT.Application.Common.Interfaces;
 using FactoryIoT.Domain.Entities;
 using FactoryIoT.Domain.Interfaces;
+using FactoryIoT.Infrastructure.Messaging;
 using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.Hosting;
 using Microsoft.Extensions.Logging;
@@ -27,17 +28,18 @@ public sealed class TelemetryIngestionWorker : BackgroundService
         "telemetry_batch_processing_seconds",
         "Time taken to process and insert a batch of telemetry records");
 
-    private readonly ITelemetryConsumer _consumer;
+    private readonly RabbitMqConfig _rabbitConfig;
     private readonly IServiceScopeFactory _scopeFactory;
     private readonly ILogger<TelemetryIngestionWorker> _logger;
     private readonly Channel<Telemetry> _channel;
+    private ITelemetryConsumer? _consumer;
 
     public TelemetryIngestionWorker(
-        ITelemetryConsumer consumer,
+        RabbitMqConfig rabbitConfig,
         IServiceScopeFactory scopeFactory,
         ILogger<TelemetryIngestionWorker> logger)
     {
-        _consumer = consumer;
+        _rabbitConfig = rabbitConfig;
         _scopeFactory = scopeFactory;
         _logger = logger;
         _channel = Channel.CreateUnbounded<Telemetry>(new UnboundedChannelOptions
@@ -49,10 +51,34 @@ public sealed class TelemetryIngestionWorker : BackgroundService
 
     protected override async Task ExecuteAsync(CancellationToken stoppingToken)
     {
-        _logger.LogInformation("Telemetry Ingestion Worker started.");
+        _logger.LogInformation("Telemetry Ingestion Worker starting...");
+
+        // Create RabbitMQ consumer with retry logic
+        const int maxRetries = 10;
+        for (int attempt = 1; attempt <= maxRetries; attempt++)
+        {
+            try
+            {
+                _logger.LogInformation("Attempting to connect to RabbitMQ (attempt {Attempt}/{MaxRetries})...", attempt, maxRetries);
+                _consumer = await RabbitMqTelemetryConsumer.CreateAsync(_rabbitConfig.Host, stoppingToken);
+                _logger.LogInformation("Successfully connected to RabbitMQ.");
+                break;
+            }
+            catch (Exception ex)
+            {
+                _logger.LogWarning(ex, "Failed to connect to RabbitMQ (attempt {Attempt}/{MaxRetries})", attempt, maxRetries);
+                if (attempt >= maxRetries)
+                {
+                    _logger.LogError("Failed to connect to RabbitMQ after {MaxRetries} attempts. Worker will exit.", maxRetries);
+                    throw;
+                }
+                // Wait before retrying (exponential backoff)
+                await Task.Delay(TimeSpan.FromSeconds(Math.Min(attempt * 2, 30)), stoppingToken);
+            }
+        }
 
         // Start consuming from RabbitMQ
-        await _consumer.StartAsync(OnTelemetryReceivedAsync, stoppingToken);
+        await _consumer!.StartAsync(OnTelemetryReceivedAsync, stoppingToken);
 
         // Start batch processor
         await ProcessBatchesAsync(stoppingToken);
@@ -151,13 +177,19 @@ public sealed class TelemetryIngestionWorker : BackgroundService
     public override async Task StopAsync(CancellationToken cancellationToken)
     {
         _logger.LogInformation("Stopping Telemetry Ingestion Worker...");
-        await _consumer.StopAsync(cancellationToken);
+        if (_consumer != null)
+        {
+            await _consumer.StopAsync(cancellationToken);
+        }
         await base.StopAsync(cancellationToken);
     }
 
     public override void Dispose()
     {
-        _consumer.DisposeAsync().AsTask().Wait();
+        if (_consumer != null)
+        {
+            _consumer.DisposeAsync().AsTask().Wait();
+        }
         base.Dispose();
     }
 }
