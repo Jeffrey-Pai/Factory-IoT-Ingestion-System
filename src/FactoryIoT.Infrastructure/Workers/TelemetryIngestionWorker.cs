@@ -156,25 +156,42 @@ public sealed class TelemetryIngestionWorker : BackgroundService
     {
         if (batch.Count == 0) return;
 
+        const int maxRetries = 3;
         var stopwatch = Stopwatch.StartNew();
-        try
+        
+        for (int attempt = 1; attempt <= maxRetries; attempt++)
         {
-            using var scope = _scopeFactory.CreateScope();
-            var repository = scope.ServiceProvider.GetRequiredService<ITelemetryRepository>();
-            
-            await repository.AddRangeAsync(batch, cancellationToken);
-            stopwatch.Stop();
+            try
+            {
+                using var scope = _scopeFactory.CreateScope();
+                var repository = scope.ServiceProvider.GetRequiredService<ITelemetryRepository>();
+                
+                await repository.AddRangeAsync(batch, cancellationToken);
+                stopwatch.Stop();
 
-            TelemetriesWrittenCounter.Inc(batch.Count);
-            BatchProcessingHistogram.Observe(stopwatch.Elapsed.TotalSeconds);
+                TelemetriesWrittenCounter.Inc(batch.Count);
+                BatchProcessingHistogram.Observe(stopwatch.Elapsed.TotalSeconds);
 
-            _logger.LogInformation("Flushed {Count} telemetry records in {ElapsedMs}ms", 
-                batch.Count, stopwatch.ElapsedMilliseconds);
-        }
-        catch (Exception ex)
-        {
-            stopwatch.Stop();
-            _logger.LogError(ex, "Failed to flush batch of {Count} telemetry records", batch.Count);
+                _logger.LogInformation("Flushed {Count} telemetry records in {ElapsedMs}ms", 
+                    batch.Count, stopwatch.ElapsedMilliseconds);
+                return; // Success, exit retry loop
+            }
+            catch (Exception ex)
+            {
+                _logger.LogError(ex, "Failed to flush batch of {Count} telemetry records (attempt {Attempt}/{MaxRetries})", 
+                    batch.Count, attempt, maxRetries);
+                
+                if (attempt >= maxRetries)
+                {
+                    stopwatch.Stop();
+                    _logger.LogCritical("Failed to flush batch after {MaxRetries} attempts. Data loss may occur for {Count} records.", 
+                        maxRetries, batch.Count);
+                    break;
+                }
+                
+                // Exponential backoff before retry
+                await Task.Delay(TimeSpan.FromSeconds(Math.Pow(2, attempt)), cancellationToken);
+            }
         }
     }
 
