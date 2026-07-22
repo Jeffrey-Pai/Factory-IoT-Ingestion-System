@@ -92,7 +92,7 @@ services:
       ASPNETCORE_ENVIRONMENT: Production
       ASPNETCORE_URLS: http://+:8080
       RABBITMQ_HOST: rabbitmq
-      ConnectionStrings__Default: "Server=mssql,1433;Database=factory_iot;User Id=sa;******;TrustServerCertificate=True"
+      ConnectionStrings__Default: "Server=mssql,1433;Database=factory_iot;User Id=sa;Password=IoT_Secret123!;TrustServerCertificate=True"
     depends_on:
       rabbitmq:
         condition: service_healthy
