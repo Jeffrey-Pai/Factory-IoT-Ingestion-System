@@ -1,0 +1,9 @@
+<Solution>
+  <Folder Name="/src/">
+    <Project Path="src/FactoryIoT.Application/FactoryIoT.Application.csproj" />
+    <Project Path="src/FactoryIoT.Domain/FactoryIoT.Domain.csproj" />
+    <Project Path="src/FactoryIoT.Infrastructure/FactoryIoT.Infrastructure.csproj" />
+    <Project Path="src/FactoryIoT.Presentation/FactoryIoT.Presentation.csproj" />
+    <Project Path="src/FactoryIoT.Simulator/FactoryIoT.Simulator.csproj" />
+  </Folder>
+</Solution>

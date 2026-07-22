@@ -1,0 +1,6 @@
+@FactoryIoT.Presentation_HostAddress = http://localhost:5297
+
+GET {{FactoryIoT.Presentation_HostAddress}}/weatherforecast/
+Accept: application/json
+
+###
