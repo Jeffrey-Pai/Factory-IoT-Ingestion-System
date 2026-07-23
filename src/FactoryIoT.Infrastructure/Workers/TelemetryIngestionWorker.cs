@@ -19,6 +19,7 @@ public sealed class TelemetryIngestionWorker : BackgroundService
 {
     private const int BatchSize = 100;
     private static readonly TimeSpan BatchInterval = TimeSpan.FromSeconds(2);
+    private static readonly TimeSpan PipelineRestartDelay = TimeSpan.FromSeconds(5);
 
     private static readonly Counter TelemetriesWrittenCounter = Metrics.CreateCounter(
         "telemetry_written_total",
@@ -75,50 +76,80 @@ public sealed class TelemetryIngestionWorker : BackgroundService
         _logger.LogInformation("Telemetry Ingestion Worker starting...");
         _logger.LogInformation("RabbitMQ Host: {RabbitMqHost}", _rabbitConfig.Host);
 
+        // Verify database connection before starting (best-effort; informational only).
         try
         {
-            // Verify database connection before starting
-            try
-            {
-                using var scope = _scopeFactory.CreateScope();
-                var dbContext = scope.ServiceProvider.GetRequiredService<FactoryIoT.Infrastructure.Persistence.FactoryIoTDbContext>();
-                await dbContext.Database.CanConnectAsync(stoppingToken);
-                _logger.LogInformation("Database connection verified successfully");
-            }
-            catch (Exception ex)
-            {
-                _logger.LogError(ex, "Failed to connect to database. Worker will still start but writes may fail.");
-            }
-
-            // Connect to RabbitMQ, retrying indefinitely so a slow/unreachable broker
-            // never permanently kills ingestion (or, previously, the whole API process).
-            _consumer = await ConnectToRabbitMqWithRetryAsync(stoppingToken);
-            _isConnected = true;
-
-            // Start consuming from RabbitMQ
-            _logger.LogInformation("Starting RabbitMQ consumer...");
-            await _consumer.StartAsync(OnTelemetryReceivedAsync, stoppingToken);
-            _logger.LogInformation("RabbitMQ consumer started successfully");
-
-            // Start batch processor
-            _isProcessing = true;
-            _logger.LogInformation("Starting batch processor...");
-            await ProcessBatchesAsync(stoppingToken);
-        }
-        catch (OperationCanceledException) when (stoppingToken.IsCancellationRequested)
-        {
-            _logger.LogInformation("Telemetry Ingestion Worker is stopping.");
+            using var scope = _scopeFactory.CreateScope();
+            var dbContext = scope.ServiceProvider.GetRequiredService<FactoryIoT.Infrastructure.Persistence.FactoryIoTDbContext>();
+            await dbContext.Database.CanConnectAsync(stoppingToken);
+            _logger.LogInformation("Database connection verified successfully");
         }
         catch (Exception ex)
         {
-            // Never let an exception escape ExecuteAsync: BackgroundService's default
-            // exception behavior stops the entire host, which would take down the API
-            // (including /health and /health/worker) along with the worker. Log it as
-            // critical and report unhealthy instead, so the process - and its health
-            // endpoints - stay up and observable.
-            _isConnected = false;
-            _isProcessing = false;
-            _logger.LogCritical(ex, "Telemetry Ingestion Worker terminated unexpectedly. Ingestion has stopped; /health/worker will report unhealthy.");
+            _logger.LogError(ex, "Failed to connect to database. Worker will still start but writes may fail.");
+        }
+
+        // Outer resilience loop. Previously, any exception that escaped the connect/consume/
+        // batch-process pipeline (or an error inside the batch loop that only logged and
+        // returned) ended ExecuteAsync for good: the host kept running, but ingestion was
+        // dead and /health/worker stayed 503 forever until someone restarted the container.
+        // Now the whole pipeline is torn down and reconnected instead of dying permanently.
+        while (!stoppingToken.IsCancellationRequested)
+        {
+            try
+            {
+                // Connect to RabbitMQ, retrying indefinitely so a slow/unreachable broker
+                // never permanently kills ingestion (or, previously, the whole API process).
+                _consumer = await ConnectToRabbitMqWithRetryAsync(stoppingToken);
+                _isConnected = true;
+
+                // Start consuming from RabbitMQ
+                _logger.LogInformation("Starting RabbitMQ consumer...");
+                await _consumer.StartAsync(OnTelemetryReceivedAsync, stoppingToken);
+                _logger.LogInformation("RabbitMQ consumer started successfully");
+
+                // Start batch processor. This only returns on cancellation or on an
+                // unrecoverable error (which it now rethrows instead of swallowing).
+                _isProcessing = true;
+                _logger.LogInformation("Starting batch processor...");
+                await ProcessBatchesAsync(stoppingToken);
+            }
+            catch (OperationCanceledException) when (stoppingToken.IsCancellationRequested)
+            {
+                _logger.LogInformation("Telemetry Ingestion Worker is stopping.");
+                break;
+            }
+            catch (Exception ex)
+            {
+                _isConnected = false;
+                _isProcessing = false;
+                _logger.LogCritical(ex,
+                    "Telemetry Ingestion Worker pipeline failed unexpectedly. Ingestion paused; " +
+                    "/health/worker will report unhealthy until it reconnects in {DelaySeconds}s.",
+                    PipelineRestartDelay.TotalSeconds);
+
+                if (_consumer is not null)
+                {
+                    try
+                    {
+                        await _consumer.DisposeAsync();
+                    }
+                    catch (Exception disposeEx)
+                    {
+                        _logger.LogWarning(disposeEx, "Error disposing stale RabbitMQ consumer during restart.");
+                    }
+                    _consumer = null;
+                }
+
+                try
+                {
+                    await Task.Delay(PipelineRestartDelay, stoppingToken);
+                }
+                catch (OperationCanceledException)
+                {
+                    break;
+                }
+            }
         }
     }
 
@@ -221,12 +252,13 @@ public sealed class TelemetryIngestionWorker : BackgroundService
         }
         catch (OperationCanceledException)
         {
-            _logger.LogInformation("Telemetry Ingestion Worker is stopping.");
+            throw;
         }
         catch (Exception ex)
         {
-            _logger.LogError(ex, "Error in batch processing loop.");
+            _logger.LogError(ex, "Error in batch processing loop. Propagating so the pipeline restarts.");
             _isProcessing = false;
+            throw;
         }
     }
 
