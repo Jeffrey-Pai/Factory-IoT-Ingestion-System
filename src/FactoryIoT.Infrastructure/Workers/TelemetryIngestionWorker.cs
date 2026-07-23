@@ -142,24 +142,27 @@ public sealed class TelemetryIngestionWorker : BackgroundService
     private async Task ProcessBatchesAsync(CancellationToken stoppingToken)
     {
         var batch = new List<Telemetry>(BatchSize);
-        var batchTimer = new PeriodicTimer(BatchInterval);
-        
-        _logger.LogInformation("Batch processor running. Batch size: {BatchSize}, Interval: {BatchInterval}s", 
+        using var batchTimer = new PeriodicTimer(BatchInterval);
+
+        _logger.LogInformation("Batch processor running. Batch size: {BatchSize}, Interval: {BatchInterval}s",
             BatchSize, BatchInterval.TotalSeconds);
+
+        // Keep a single outstanding read/timer task at a time. PeriodicTimer.WaitForNextTickAsync
+        // (and a SingleReader Channel's ReadAsync) must not be invoked again while a previous call
+        // is still pending, or it throws/corrupts state - so each is only re-issued after it completes.
+        var readTask = _channel.Reader.ReadAsync(stoppingToken).AsTask();
+        var timerTask = batchTimer.WaitForNextTickAsync(stoppingToken).AsTask();
 
         try
         {
             while (!stoppingToken.IsCancellationRequested)
             {
-                // Try to read from channel with timeout
-                var readTask = _channel.Reader.ReadAsync(stoppingToken).AsTask();
-                var timerTask = batchTimer.WaitForNextTickAsync(stoppingToken).AsTask();
-
                 var completedTask = await Task.WhenAny(readTask, timerTask);
 
-                if (completedTask == readTask && readTask.IsCompletedSuccessfully)
+                if (completedTask == readTask)
                 {
-                    batch.Add(readTask.Result);
+                    batch.Add(await readTask);
+                    readTask = _channel.Reader.ReadAsync(stoppingToken).AsTask();
 
                     // Accumulate more items if available (up to batch size)
                     while (batch.Count < BatchSize && _channel.Reader.TryRead(out var item))
@@ -175,8 +178,11 @@ public sealed class TelemetryIngestionWorker : BackgroundService
                         batch.Clear();
                     }
                 }
-                else if (completedTask == timerTask)
+                else
                 {
+                    await timerTask;
+                    timerTask = batchTimer.WaitForNextTickAsync(stoppingToken).AsTask();
+
                     // Timer elapsed, flush if we have any data
                     if (batch.Count > 0)
                     {
