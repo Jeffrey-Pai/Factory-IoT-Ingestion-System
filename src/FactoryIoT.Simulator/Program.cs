@@ -16,13 +16,25 @@ const int IntervalMs = 1000; // publish every 1 second per machine
 const string QueueName = "telemetry-queue";
 
 var rabbitHost = Environment.GetEnvironmentVariable("RABBITMQ_HOST") ?? "localhost";
+var rabbitPort = int.TryParse(Environment.GetEnvironmentVariable("RABBITMQ_PORT"), out var parsedPort) ? parsedPort : 5672;
+var rabbitUser = Environment.GetEnvironmentVariable("RABBITMQ_USER") ?? "guest";
+var rabbitPass = Environment.GetEnvironmentVariable("RABBITMQ_PASS") ?? "guest";
 using var cts = new CancellationTokenSource();
 Console.CancelKeyPress += (_, e) => { e.Cancel = true; cts.Cancel(); };
 
-Console.WriteLine($"[Simulator] Starting {MachineCount} equipment → RabbitMQ @ {rabbitHost}");
+Console.WriteLine($"[Simulator] Starting {MachineCount} equipment → RabbitMQ @ {rabbitHost}:{rabbitPort} (user '{rabbitUser}')");
 
-// Initialize RabbitMQ connection
-var factory = new ConnectionFactory { HostName = rabbitHost };
+// Initialize RabbitMQ connection. Automatic recovery keeps the simulator publishing
+// across transient broker restarts instead of crashing on the first blip.
+var factory = new ConnectionFactory
+{
+    HostName = rabbitHost,
+    Port = rabbitPort,
+    UserName = rabbitUser,
+    Password = rabbitPass,
+    AutomaticRecoveryEnabled = true,
+    TopologyRecoveryEnabled = true,
+};
 await using var connection = await factory.CreateConnectionAsync(cts.Token);
 await using var channel = await connection.CreateChannelAsync(cancellationToken: cts.Token);
 

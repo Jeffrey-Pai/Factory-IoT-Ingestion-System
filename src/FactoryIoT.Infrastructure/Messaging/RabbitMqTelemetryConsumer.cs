@@ -15,6 +15,11 @@ public sealed class RabbitMqTelemetryConsumer : ITelemetryConsumer
 {
     private const string QueueName = "telemetry-queue";
 
+    // Cap the number of unacknowledged messages the broker will push to this consumer.
+    // Without a prefetch limit an autoAck=false consumer is handed the entire backlog at
+    // once, which balloons memory and starves the batch processor of backpressure.
+    private const ushort PrefetchCount = 500;
+
     private readonly IConnection _connection;
     private readonly IChannel _channel;
     private readonly ILogger<RabbitMqTelemetryConsumer> _logger;
@@ -28,21 +33,25 @@ public sealed class RabbitMqTelemetryConsumer : ITelemetryConsumer
         _logger = logger;
     }
 
-    public static async Task<RabbitMqTelemetryConsumer> CreateAsync(string hostName, ILogger<RabbitMqTelemetryConsumer> logger, CancellationToken cancellationToken = default)
+    public static async Task<RabbitMqTelemetryConsumer> CreateAsync(RabbitMqConfig config, ILogger<RabbitMqTelemetryConsumer> logger, CancellationToken cancellationToken = default)
     {
-        logger.LogInformation("Creating RabbitMQ connection to {HostName}...", hostName);
-        
-        var factory = new ConnectionFactory { HostName = hostName };
+        logger.LogInformation("Creating RabbitMQ connection to {HostName}:{Port} as user '{User}'...",
+            config.Host, config.Port, config.Username);
+
+        var factory = config.CreateConnectionFactory();
         var connection = await factory.CreateConnectionAsync(cancellationToken);
         var channel = await connection.CreateChannelAsync(cancellationToken: cancellationToken);
-        
+
         logger.LogInformation("Declaring queue '{QueueName}' (durable=true)...", QueueName);
-        
+
         // Declare queue (durable = true for persistence)
         await channel.QueueDeclareAsync(QueueName, durable: true, exclusive: false, autoDelete: false, cancellationToken: cancellationToken);
-        
-        logger.LogInformation("RabbitMQ consumer created successfully for queue '{QueueName}'", QueueName);
-        
+
+        // Apply prefetch (QoS) so the broker never dumps the whole backlog on us at once.
+        await channel.BasicQosAsync(prefetchSize: 0, prefetchCount: PrefetchCount, global: false, cancellationToken: cancellationToken);
+
+        logger.LogInformation("RabbitMQ consumer created successfully for queue '{QueueName}' (prefetch={PrefetchCount})", QueueName, PrefetchCount);
+
         return new RabbitMqTelemetryConsumer(connection, channel, logger);
     }
 

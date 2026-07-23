@@ -23,9 +23,9 @@ public sealed class RabbitMqPublisher : IMessagePublisher, IAsyncDisposable
         _channel = channel;
     }
 
-    public static async Task<RabbitMqPublisher> CreateAsync(string hostName, CancellationToken cancellationToken = default)
+    public static async Task<RabbitMqPublisher> CreateAsync(RabbitMqConfig config, CancellationToken cancellationToken = default)
     {
-        var factory = new ConnectionFactory { HostName = hostName };
+        var factory = config.CreateConnectionFactory();
         var connection = await factory.CreateConnectionAsync(cancellationToken);
         var channel = await connection.CreateChannelAsync(cancellationToken: cancellationToken);
         await channel.ExchangeDeclareAsync(ExchangeName, ExchangeType.Fanout, durable: true, cancellationToken: cancellationToken);

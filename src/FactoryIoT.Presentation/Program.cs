@@ -23,11 +23,28 @@ builder.Services.AddDbContext<FactoryIoTDbContext>(options =>
 // Register repositories
 builder.Services.AddScoped<ITelemetryRepository, TelemetryRepository>();
 
-// Register RabbitMQ host configuration
-var rabbitHost = builder.Configuration.GetValue<string>("RabbitMQ:Host") 
-    ?? Environment.GetEnvironmentVariable("RABBITMQ_HOST") 
-    ?? "localhost";
-builder.Services.AddSingleton(new RabbitMqConfig { Host = rabbitHost });
+// Register RabbitMQ connection configuration (host/port/credentials).
+//
+// IMPORTANT: the plain RABBITMQ_* env vars (single underscore) are read FIRST.
+// They do NOT bind to the hierarchical "RabbitMQ:*" keys the way ASP.NET's
+// double-underscore convention does, so if we consulted appsettings first the
+// hardcoded "localhost" there would always win and the RABBITMQ_HOST=rabbitmq
+// override supplied by docker-compose would be silently ignored — which is exactly
+// what made the worker dial localhost inside its own container and never consume.
+// Order: RABBITMQ_* env var → "RabbitMQ:*" appsettings section → default.
+static string? EnvOrConfig(IConfiguration config, string envVar, string configKey)
+    => Environment.GetEnvironmentVariable(envVar) is { Length: > 0 } value
+        ? value
+        : config.GetValue<string>(configKey);
+
+var rabbitConfig = new RabbitMqConfig
+{
+    Host = EnvOrConfig(builder.Configuration, "RABBITMQ_HOST", "RabbitMQ:Host") ?? "localhost",
+    Port = int.TryParse(EnvOrConfig(builder.Configuration, "RABBITMQ_PORT", "RabbitMQ:Port"), out var port) ? port : 5672,
+    Username = EnvOrConfig(builder.Configuration, "RABBITMQ_USER", "RabbitMQ:Username") ?? "guest",
+    Password = EnvOrConfig(builder.Configuration, "RABBITMQ_PASS", "RabbitMQ:Password") ?? "guest",
+};
+builder.Services.AddSingleton(rabbitConfig);
 
 // Register background worker as singleton to enable health checks
 builder.Services.AddSingleton<TelemetryIngestionWorker>();

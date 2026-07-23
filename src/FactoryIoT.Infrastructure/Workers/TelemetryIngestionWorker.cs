@@ -74,7 +74,8 @@ public sealed class TelemetryIngestionWorker : BackgroundService
     protected override async Task ExecuteAsync(CancellationToken stoppingToken)
     {
         _logger.LogInformation("Telemetry Ingestion Worker starting...");
-        _logger.LogInformation("RabbitMQ Host: {RabbitMqHost}", _rabbitConfig.Host);
+        _logger.LogInformation("RabbitMQ endpoint: {RabbitMqHost}:{RabbitMqPort} (user '{RabbitMqUser}')",
+            _rabbitConfig.Host, _rabbitConfig.Port, _rabbitConfig.Username);
 
         // Verify database connection before starting (best-effort; informational only).
         try
@@ -162,7 +163,7 @@ public sealed class TelemetryIngestionWorker : BackgroundService
             try
             {
                 _logger.LogInformation("Attempting to connect to RabbitMQ (attempt {Attempt})...", attempt);
-                var consumer = await RabbitMqTelemetryConsumer.CreateAsync(_rabbitConfig.Host, consumerLogger, stoppingToken);
+                var consumer = await RabbitMqTelemetryConsumer.CreateAsync(_rabbitConfig, consumerLogger, stoppingToken);
                 _logger.LogInformation("Successfully connected to RabbitMQ at {Host}", _rabbitConfig.Host);
                 return consumer;
             }
