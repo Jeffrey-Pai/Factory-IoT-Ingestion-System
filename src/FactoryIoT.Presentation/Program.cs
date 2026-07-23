@@ -33,6 +33,13 @@ builder.Services.AddSingleton(new RabbitMqConfig { Host = rabbitHost });
 builder.Services.AddSingleton<TelemetryIngestionWorker>();
 builder.Services.AddHostedService(sp => sp.GetRequiredService<TelemetryIngestionWorker>());
 
+// If the worker's BackgroundService ever faults, keep the host (and its API/health
+// endpoints) running instead of the default behavior of shutting the whole process down.
+builder.Services.Configure<HostOptions>(options =>
+{
+    options.BackgroundServiceExceptionBehavior = BackgroundServiceExceptionBehavior.Ignore;
+});
+
 var app = builder.Build();
 
 // Run database migrations on startup

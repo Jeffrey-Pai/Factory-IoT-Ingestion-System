@@ -75,54 +75,73 @@ public sealed class TelemetryIngestionWorker : BackgroundService
         _logger.LogInformation("Telemetry Ingestion Worker starting...");
         _logger.LogInformation("RabbitMQ Host: {RabbitMqHost}", _rabbitConfig.Host);
 
-        // Verify database connection before starting
         try
         {
-            using var scope = _scopeFactory.CreateScope();
-            var dbContext = scope.ServiceProvider.GetRequiredService<FactoryIoT.Infrastructure.Persistence.FactoryIoTDbContext>();
-            await dbContext.Database.CanConnectAsync(stoppingToken);
-            _logger.LogInformation("Database connection verified successfully");
-        }
-        catch (Exception ex)
-        {
-            _logger.LogError(ex, "Failed to connect to database. Worker will still start but writes may fail.");
-        }
-
-        // Create RabbitMQ consumer with retry logic
-        const int maxRetries = 10;
-        for (int attempt = 1; attempt <= maxRetries; attempt++)
-        {
+            // Verify database connection before starting
             try
             {
-                _logger.LogInformation("Attempting to connect to RabbitMQ (attempt {Attempt}/{MaxRetries})...", attempt, maxRetries);
-                var consumerLogger = _loggerFactory.CreateLogger<RabbitMqTelemetryConsumer>();
-                _consumer = await RabbitMqTelemetryConsumer.CreateAsync(_rabbitConfig.Host, consumerLogger, stoppingToken);
-                _isConnected = true;
-                _logger.LogInformation("Successfully connected to RabbitMQ at {Host}", _rabbitConfig.Host);
-                break;
+                using var scope = _scopeFactory.CreateScope();
+                var dbContext = scope.ServiceProvider.GetRequiredService<FactoryIoT.Infrastructure.Persistence.FactoryIoTDbContext>();
+                await dbContext.Database.CanConnectAsync(stoppingToken);
+                _logger.LogInformation("Database connection verified successfully");
             }
             catch (Exception ex)
             {
-                _logger.LogWarning(ex, "Failed to connect to RabbitMQ (attempt {Attempt}/{MaxRetries})", attempt, maxRetries);
-                if (attempt >= maxRetries)
-                {
-                    _logger.LogError("Failed to connect to RabbitMQ after {MaxRetries} attempts. Worker will exit.", maxRetries);
-                    throw;
-                }
-                // Wait before retrying (exponential backoff)
-                await Task.Delay(TimeSpan.FromSeconds(Math.Min(attempt * 2, 30)), stoppingToken);
+                _logger.LogError(ex, "Failed to connect to database. Worker will still start but writes may fail.");
+            }
+
+            // Connect to RabbitMQ, retrying indefinitely so a slow/unreachable broker
+            // never permanently kills ingestion (or, previously, the whole API process).
+            _consumer = await ConnectToRabbitMqWithRetryAsync(stoppingToken);
+            _isConnected = true;
+
+            // Start consuming from RabbitMQ
+            _logger.LogInformation("Starting RabbitMQ consumer...");
+            await _consumer.StartAsync(OnTelemetryReceivedAsync, stoppingToken);
+            _logger.LogInformation("RabbitMQ consumer started successfully");
+
+            // Start batch processor
+            _isProcessing = true;
+            _logger.LogInformation("Starting batch processor...");
+            await ProcessBatchesAsync(stoppingToken);
+        }
+        catch (OperationCanceledException) when (stoppingToken.IsCancellationRequested)
+        {
+            _logger.LogInformation("Telemetry Ingestion Worker is stopping.");
+        }
+        catch (Exception ex)
+        {
+            // Never let an exception escape ExecuteAsync: BackgroundService's default
+            // exception behavior stops the entire host, which would take down the API
+            // (including /health and /health/worker) along with the worker. Log it as
+            // critical and report unhealthy instead, so the process - and its health
+            // endpoints - stay up and observable.
+            _isConnected = false;
+            _isProcessing = false;
+            _logger.LogCritical(ex, "Telemetry Ingestion Worker terminated unexpectedly. Ingestion has stopped; /health/worker will report unhealthy.");
+        }
+    }
+
+    private async Task<RabbitMqTelemetryConsumer> ConnectToRabbitMqWithRetryAsync(CancellationToken stoppingToken)
+    {
+        var consumerLogger = _loggerFactory.CreateLogger<RabbitMqTelemetryConsumer>();
+
+        for (int attempt = 1; ; attempt++)
+        {
+            try
+            {
+                _logger.LogInformation("Attempting to connect to RabbitMQ (attempt {Attempt})...", attempt);
+                var consumer = await RabbitMqTelemetryConsumer.CreateAsync(_rabbitConfig.Host, consumerLogger, stoppingToken);
+                _logger.LogInformation("Successfully connected to RabbitMQ at {Host}", _rabbitConfig.Host);
+                return consumer;
+            }
+            catch (Exception ex)
+            {
+                var delay = TimeSpan.FromSeconds(Math.Min(attempt * 2, 30));
+                _logger.LogWarning(ex, "Failed to connect to RabbitMQ (attempt {Attempt}). Retrying in {Delay}s...", attempt, delay.TotalSeconds);
+                await Task.Delay(delay, stoppingToken);
             }
         }
-
-        // Start consuming from RabbitMQ
-        _logger.LogInformation("Starting RabbitMQ consumer...");
-        await _consumer!.StartAsync(OnTelemetryReceivedAsync, stoppingToken);
-        _logger.LogInformation("RabbitMQ consumer started successfully");
-
-        // Start batch processor
-        _isProcessing = true;
-        _logger.LogInformation("Starting batch processor...");
-        await ProcessBatchesAsync(stoppingToken);
     }
 
     private async Task OnTelemetryReceivedAsync(Telemetry telemetry)
