@@ -15,6 +15,11 @@ services:
       - "15672:15672"  # Management UI
     volumes:
       - rabbitmq_data:/var/lib/rabbitmq
+      # Lifts the guest loopback-only restriction so the API/simulator containers
+      # can authenticate over the Docker network (see rabbitmq.conf for details).
+      # Mounted into conf.d/ (merged, loads after the image's own default-user
+      # config) so it never conflicts with RABBITMQ_DEFAULT_USER handling.
+      - ./rabbitmq.conf:/etc/rabbitmq/conf.d/20-loopback.conf:ro
     healthcheck:
       test: ["CMD", "rabbitmq-diagnostics", "-q", "ping"]
       interval: 10s
@@ -92,6 +97,9 @@ services:
       ASPNETCORE_ENVIRONMENT: Production
       ASPNETCORE_URLS: http://+:8080
       RABBITMQ_HOST: rabbitmq
+      RABBITMQ_PORT: "5672"
+      RABBITMQ_USER: guest
+      RABBITMQ_PASS: guest
       ConnectionStrings__Default: "Server=mssql,1433;Database=factory_iot;User Id=sa;Password=IoT_Secret123!;TrustServerCertificate=True"
     depends_on:
       rabbitmq:
@@ -110,6 +118,9 @@ services:
     restart: unless-stopped
     environment:
       RABBITMQ_HOST: rabbitmq
+      RABBITMQ_PORT: "5672"
+      RABBITMQ_USER: guest
+      RABBITMQ_PASS: guest
     depends_on:
       rabbitmq:
         condition: service_healthy
