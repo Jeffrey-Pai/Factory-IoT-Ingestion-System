@@ -4,6 +4,8 @@ using FactoryIoT.Application.Common.Interfaces;
 using FactoryIoT.Domain.Entities;
 using FactoryIoT.Domain.Interfaces;
 using FactoryIoT.Infrastructure.Messaging;
+using FactoryIoT.Infrastructure.Persistence;
+using Microsoft.EntityFrameworkCore;
 using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.Hosting;
 using Microsoft.Extensions.Logging;
@@ -28,6 +30,10 @@ public sealed class TelemetryIngestionWorker : BackgroundService
     private static readonly Counter TelemetriesConsumedCounter = Metrics.CreateCounter(
         "telemetry_consumed_total",
         "Total number of telemetry messages consumed from RabbitMQ");
+
+    private static readonly Counter SensorReadingsWrittenCounter = Metrics.CreateCounter(
+        "sensor_readings_written_total",
+        "Total number of normalized per-sensor readings written to database");
 
     private static readonly Counter TelemetriesFailedCounter = Metrics.CreateCounter(
         "telemetry_failed_total",
@@ -267,26 +273,43 @@ public sealed class TelemetryIngestionWorker : BackgroundService
     {
         if (batch.Count == 0) return;
 
+        // Fan each wide Telemetry snapshot out into its normalized per-sensor readings so the
+        // SensorReadings table carries the same data in a query-by-sensor-type shape.
+        var sensorReadings = batch.SelectMany(SensorReading.FromTelemetry).ToList();
+
         const int maxRetries = 3;
         var stopwatch = Stopwatch.StartNew();
-        
+
         for (int attempt = 1; attempt <= maxRetries; attempt++)
         {
             try
             {
                 using var scope = _scopeFactory.CreateScope();
-                var repository = scope.ServiceProvider.GetRequiredService<ITelemetryRepository>();
-                
-                _logger.LogDebug("Saving batch of {Count} telemetry records to database (attempt {Attempt})...", batch.Count, attempt);
-                await repository.AddRangeAsync(batch, cancellationToken);
+                var dbContext = scope.ServiceProvider.GetRequiredService<FactoryIoTDbContext>();
+                var telemetryRepository = scope.ServiceProvider.GetRequiredService<ITelemetryRepository>();
+                var sensorReadingRepository = scope.ServiceProvider.GetRequiredService<ISensorReadingRepository>();
+
+                _logger.LogDebug(
+                    "Saving batch of {TelemetryCount} telemetry records and {SensorReadingCount} sensor readings to database (attempt {Attempt})...",
+                    batch.Count, sensorReadings.Count, attempt);
+
+                // Both repositories resolve the same scoped DbContext, so a single transaction
+                // makes the two writes atomic: either both tables get the batch or neither does.
+                // That keeps them reconciled and makes a retry after failure safe (a rolled-back
+                // attempt commits nothing, so re-inserting the same primary keys can't collide).
+                await using var transaction = await dbContext.Database.BeginTransactionAsync(cancellationToken);
+                await telemetryRepository.AddRangeAsync(batch, cancellationToken);
+                await sensorReadingRepository.AddRangeAsync(sensorReadings, cancellationToken);
+                await transaction.CommitAsync(cancellationToken);
                 stopwatch.Stop();
 
                 TelemetriesWrittenCounter.Inc(batch.Count);
+                SensorReadingsWrittenCounter.Inc(sensorReadings.Count);
                 BatchProcessingHistogram.Observe(stopwatch.Elapsed.TotalSeconds);
                 _lastBatchFlushed = DateTimeOffset.UtcNow;
 
-                _logger.LogInformation("✓ Successfully saved {Count} telemetry records to MSSQL in {ElapsedMs}ms", 
-                    batch.Count, stopwatch.ElapsedMilliseconds);
+                _logger.LogInformation("✓ Successfully saved {Count} telemetry records and {SensorReadingCount} sensor readings to MSSQL in {ElapsedMs}ms",
+                    batch.Count, sensorReadings.Count, stopwatch.ElapsedMilliseconds);
                 return; // Success, exit retry loop
             }
             catch (Exception ex)
