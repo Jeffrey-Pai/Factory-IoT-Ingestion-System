@@ -1,6 +1,29 @@
 # Factory-IoT-Ingestion-System
 基於 .NET 8、RabbitMQ 與 Channel 批次處理的高吞吐量工廠 IoT 數據採集系統。包含多執行緒設備模擬（50+ 機台）、Prometheus/Grafana 可觀測性監控與 k6 壓測驗證。
 
+## 📚 文件導覽
+
+| 文件 | 內容 | 適合誰 |
+|------|------|--------|
+| 📐 [系統架構 ARCHITECTURE.md](./docs/ARCHITECTURE.md) | 架構圖、資料流、分層設計、技術決策 | 想了解「系統在幹嘛」 |
+| 🛠️ [操作手冊 OPERATIONS.md](./docs/OPERATIONS.md) | 啟動、驗證、監控設定、壓測、故障排除 | 要把系統跑起來、維運 |
+| 👩‍💻 [開發者指南 DEVELOPMENT.md](./docs/DEVELOPMENT.md) | 本機開發、加 API、加 Migration、除錯 | 要改程式碼 |
+| ✅ [驗證指南 VERIFICATION_GUIDE.md](./VERIFICATION_GUIDE.md) | RabbitMQ→MSSQL 資料流驗證與診斷 | 排查資料未入庫問題 |
+
+## 🗺️ 系統一覽
+
+```mermaid
+flowchart LR
+    SIM["🏭 Simulator<br/>50 台機台<br/>每秒發布遙測"] --> MQ[["🐇 RabbitMQ<br/>telemetry-queue"]]
+    MQ --> W["⚙️ Backend Worker<br/>Channel 緩衝 + 批次寫入"]
+    W --> DB[("🗄️ SQL Server")]
+    API["🌐 REST API"] --> DB
+    PROM["📈 Prometheus"] --> API
+    GRAF["📊 Grafana"] --> PROM
+```
+
+> 詳細架構、資料流時序圖與分層說明請見 [ARCHITECTURE.md](./docs/ARCHITECTURE.md)。
+
 ## 🚀 快速開始
 
 ### 前置需求
@@ -137,6 +160,8 @@ vus............................: 50      min=50  max=50
 - **SQL Server**: 儲存遙測數據
 - **Prometheus**: 收集 metrics
 - **Grafana**: 視覺化監控儀表板
+
+> 📐 完整的架構圖（系統情境圖、容器部署圖、資料流時序圖、Clean Architecture 分層圖、Worker 狀態機）與技術決策說明，請見 **[docs/ARCHITECTURE.md](./docs/ARCHITECTURE.md)**。
 
 ## 🔧 使用 SQL Server Management Studio (SSMS)
 
