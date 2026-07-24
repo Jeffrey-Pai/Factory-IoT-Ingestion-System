@@ -157,4 +157,61 @@ app.MapGet("/api/v1/sensors/{machineId}/readings", async (
 .WithName("GetLatestSensorReadings")
 .WithOpenApi();
 
+// ── Fleet monitoring & analytics ────────────────────────────────────────────────
+// These read-only endpoints answer the "how is the floor doing?" questions the raw
+// latest-N endpoints can't: the whole fleet at a glance, one machine's behaviour over
+// a time window, and a fleet-wide health summary. All aggregation runs in SQL Server
+// (GROUP BY) so the API never pulls raw rows just to reduce them in memory.
+
+// Fleet roster: one rolled-up row per machine that has ever reported (sample count,
+// first/last seen, and min/max/avg for temperature & pressure), ordered by machine id.
+app.MapGet("/api/v1/machines", async (ITelemetryRepository repository) =>
+{
+    var summaries = await repository.GetMachineSummariesAsync();
+    return Results.Ok(summaries);
+})
+.WithName("GetMachineSummaries")
+.WithOpenApi();
+
+// Per-machine statistics over a rolling time window (default: last 60 minutes).
+// Returns 404 when the machine reported nothing in the window.
+app.MapGet("/api/v1/telemetry/{machineId}/stats", async (
+    string machineId,
+    int? windowMinutes,
+    ITelemetryRepository repository) =>
+{
+    var minutes = windowMinutes ?? 60;
+    if (minutes <= 0 || minutes > 43200) // cap the look-back at 30 days
+    {
+        return Results.BadRequest(new { error = "windowMinutes must be between 1 and 43200" });
+    }
+
+    var from = DateTimeOffset.UtcNow.AddMinutes(-minutes);
+    var stats = await repository.GetStatisticsAsync(machineId, from);
+    return stats is null
+        ? Results.NotFound(new { error = $"No telemetry for machine '{machineId}' in the last {minutes} minute(s)" })
+        : Results.Ok(stats);
+})
+.WithName("GetTelemetryStats")
+.WithOpenApi();
+
+// Fleet-wide health snapshot over a rolling time window (default: last 60 minutes):
+// how many machines are reporting, total reading volume, and the breakdown by status.
+app.MapGet("/api/v1/fleet/status", async (
+    int? windowMinutes,
+    ITelemetryRepository repository) =>
+{
+    var minutes = windowMinutes ?? 60;
+    if (minutes <= 0 || minutes > 43200) // cap the look-back at 30 days
+    {
+        return Results.BadRequest(new { error = "windowMinutes must be between 1 and 43200" });
+    }
+
+    var from = DateTimeOffset.UtcNow.AddMinutes(-minutes);
+    var status = await repository.GetFleetStatusAsync(from);
+    return Results.Ok(status);
+})
+.WithName("GetFleetStatus")
+.WithOpenApi();
+
 app.Run();

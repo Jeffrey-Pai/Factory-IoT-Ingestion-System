@@ -91,9 +91,15 @@ docker compose ps
 |------|------|------|
 | GET | `/health` | 基本存活檢查，回 `{ "status": "healthy" }` |
 | GET | `/health/worker` | Worker 詳細狀態；不健康時回 **HTTP 503** |
-| GET | `/api/v1/telemetry/{machineId}/latest?count=N` | 查某台機台最新 N 筆（`count` 需 1–100） |
+| GET | `/api/v1/telemetry/{machineId}/latest?count=N` | 查某台機台最新 N 筆寬表快照（`count` 需 1–100） |
+| GET | `/api/v1/sensors/{machineId}/readings?count=N&sensorType=` | 查某台機台最新 N 筆正規化感測讀值，可用 `sensorType`（Temperature／Pressure）篩選 |
+| GET | `/api/v1/machines` | **機台總覽**：每台機台一列彙總（樣本數、首/末回報時間、溫度與壓力的 min/max/avg），依機台代號排序 |
+| GET | `/api/v1/telemetry/{machineId}/stats?windowMinutes=N` | **單機統計**：某台機台在最近 N 分鐘（預設 60）的聚合統計；該窗內查無資料回 **404** |
+| GET | `/api/v1/fleet/status?windowMinutes=N` | **全廠健康快照**：最近 N 分鐘（預設 60）有幾台在回報、總讀值數、依狀態（Running／Warning…）分佈 |
 | GET | `/metrics` | Prometheus 指標 |
 | GET | `/swagger` | Swagger UI（僅開發環境） |
+
+> `windowMinutes` 需為 1–43200（上限 30 天）；超出範圍回 **400**。分析端點的聚合全部在 SQL Server 端以 `GROUP BY` 完成，API 不會為了統計把原始資料整批撈回記憶體。
 
 ---
 
@@ -145,6 +151,19 @@ curl "http://localhost:8080/api/v1/telemetry/EQP-001/latest?count=5"
 ```
 
 應回傳最近 5 筆遙測（JSON 陣列，含溫度、壓力、狀態、時間戳）。
+
+也可以用分析端點從「單機 → 全廠」兩個角度快速確認資料有在流動：
+
+```bash
+# 機台總覽：每台一列彙總（樣本數、min/max/avg…）
+curl "http://localhost:8080/api/v1/machines"
+
+# 單機統計：EQP-001 最近 15 分鐘的聚合
+curl "http://localhost:8080/api/v1/telemetry/EQP-001/stats?windowMinutes=15"
+
+# 全廠健康快照：最近 5 分鐘有幾台在回報、狀態分佈
+curl "http://localhost:8080/api/v1/fleet/status?windowMinutes=5"
+```
 
 ### 4.5 佇列有沒有積壓
 
@@ -256,7 +275,7 @@ docker run --rm -i --network=host -v "$(pwd):/scripts" grafana/k6:latest run /sc
 | 閾值 — P95 延遲 | < 200ms |
 | 閾值 — 錯誤率 | < 1% |
 
-> ⚠️ **注意**：`k6-script.js` 內建的機台代號是 `M001`、`M002`…，但模擬器實際產生的是 `EQP-001`…。這代表壓測會拿到 `200 OK` 但**空陣列**（查無資料），仍能測 API 吞吐/延遲，但測不到真實查詢負載。若要壓到真實資料，請把腳本裡的 `machineIds` 改成 `EQP-001` ~ `EQP-050` 格式。
+> ✅ `k6-script.js` 的 `machineIds` 已對齊模擬器實際產生的 `EQP-001` ~ `EQP-050`，因此壓測會打到真實資料。若你改了模擬器的機台命名，記得同步腳本裡的 `machineIds`，否則會拿到 `200 OK` 但**空陣列**（查無資料）。
 
 ---
 

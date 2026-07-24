@@ -46,24 +46,27 @@ Factory-IoT-Ingestion-System/
 ├─ rabbitmq.conf                      # 解除 guest loopback 限制
 ├─ k6-script.js                       # 壓測腳本
 ├─ docs/                              # ← 你在這裡
-└─ src/
-   ├─ FactoryIoT.Domain/             # 實體 + 儲存庫介面（無外部相依）
-   │  ├─ Entities/                   #   Telemetry, SensorReading
-   │  └─ Interfaces/                 #   ITelemetryRepository, ...
-   ├─ FactoryIoT.Application/        # DTO + 應用介面（相依 Domain）
-   │  ├─ DTOs/
-   │  └─ Common/Interfaces/          #   ITelemetryConsumer, IMessagePublisher
-   ├─ FactoryIoT.Infrastructure/     # 外部技術實作（相依 Domain + Application）
-   │  ├─ Messaging/                  #   RabbitMQ Consumer / Publisher / Config
-   │  ├─ Workers/                    #   TelemetryIngestionWorker（核心）
-   │  ├─ Persistence/                #   DbContext / Repository
-   │  └─ Migrations/                 #   EF Core 遷移
-   ├─ FactoryIoT.Presentation/       # Web API 入口（相依 Application + Infrastructure）
-   │  ├─ Program.cs                  #   Minimal API + DI 組裝
-   │  └─ Dockerfile
-   └─ FactoryIoT.Simulator/          # 資料產生器 Console（相依 Domain）
-      ├─ Program.cs
-      └─ Dockerfile
+├─ src/
+│  ├─ FactoryIoT.Domain/             # 實體 + 儲存庫介面（無外部相依）
+│  │  ├─ Entities/                   #   Telemetry, SensorReading
+│  │  ├─ Analytics/                  #   MachineTelemetrySummary, TelemetryStatistics, FleetStatus（分析 read-model）
+│  │  └─ Interfaces/                 #   ITelemetryRepository, ...
+│  ├─ FactoryIoT.Application/        # DTO + 應用介面（相依 Domain）
+│  │  ├─ DTOs/
+│  │  └─ Common/Interfaces/          #   ITelemetryConsumer, IMessagePublisher
+│  ├─ FactoryIoT.Infrastructure/     # 外部技術實作（相依 Domain + Application）
+│  │  ├─ Messaging/                  #   RabbitMQ Consumer / Publisher / Config
+│  │  ├─ Workers/                    #   TelemetryIngestionWorker（核心）
+│  │  ├─ Persistence/                #   DbContext / Repository
+│  │  └─ Migrations/                 #   EF Core 遷移
+│  ├─ FactoryIoT.Presentation/       # Web API 入口（相依 Application + Infrastructure）
+│  │  ├─ Program.cs                  #   Minimal API + DI 組裝
+│  │  └─ Dockerfile
+│  └─ FactoryIoT.Simulator/          # 資料產生器 Console（相依 Domain）
+│     ├─ Program.cs
+│     └─ Dockerfile
+└─ tests/
+   └─ FactoryIoT.Tests/              # xUnit：Domain 純邏輯 + Repository（EF Core InMemory）
 ```
 
 **依賴方向鐵律**：`Presentation → Infrastructure → Application → Domain`。Domain 不可 `using` 任何外層或第三方套件。加程式碼前先想清楚「這段該放哪一層」。
@@ -84,6 +87,18 @@ docker compose up -d --build
 dotnet restore FactoryIoT.slnx
 dotnet build FactoryIoT.slnx
 ```
+
+### 執行測試
+
+單元測試放在 `tests/FactoryIoT.Tests`（xUnit）。測試**不需要** Docker、RabbitMQ 或 SQL Server — Repository 的分析查詢是跑在 EF Core 的 **InMemory** provider 上：
+
+```bash
+dotnet test FactoryIoT.slnx
+```
+
+涵蓋範圍：
+- **Domain 純邏輯** — `SensorReading.FromTelemetry` 的拆解與參數防呆。
+- **Repository 分析查詢** — `GetMachineSummariesAsync`／`GetStatisticsAsync`（含時間窗過濾與查無資料回 `null`）／`GetFleetStatusAsync`（機台計數與狀態分佈），以及既有的 `GetLatestByMachineAsync`。
 
 ---
 
@@ -165,7 +180,7 @@ dotnet ef database update \
 在 `src/FactoryIoT.Presentation/Program.cs` 用 Minimal API 風格新增（依樣畫葫蘆）：
 
 ```csharp
-app.MapGet("/api/v1/telemetry/{machineId}/stats", async (
+app.MapGet("/api/v1/telemetry/{machineId}/health-score", async (
     string machineId,
     ITelemetryRepository repository) =>
 {
@@ -178,11 +193,13 @@ app.MapGet("/api/v1/telemetry/{machineId}/stats", async (
         maxPressure = latest.Max(t => t.Pressure),
     });
 })
-.WithName("GetTelemetryStats")
+.WithName("GetMachineHealthScore")
 .WithOpenApi();
 ```
 
 若需要新的查詢能力，先在 `Domain/Interfaces/ITelemetryRepository.cs` 加方法，再到 `Infrastructure/Persistence/TelemetryRepository.cs` 實作（依賴反轉原則）。
+
+> 💡 **真實範例**：機台總覽／單機統計／全廠健康快照這三個分析端點（`/api/v1/machines`、`/api/v1/telemetry/{machineId}/stats`、`/api/v1/fleet/status`）就是照這個流程做出來的 —— 介面加在 `ITelemetryRepository`、實作用 EF Core `GroupBy` 在 **DB 端**聚合、回傳 `Domain/Analytics` 下的 read-model record。它們跟上面「撈 100 筆再於記憶體算」的示範不同，是把聚合下推到 SQL Server，資料量大時效率差很多。可直接讀這三個當範本。
 
 ### 6.2 新增一個遙測欄位
 
@@ -237,7 +254,7 @@ app.MapGet("/api/v1/telemetry/{machineId}/stats", async (
 
 - **本機跑 API 卻連不到 DB/MQ** → 確認基礎服務容器有起來（`docker compose ps`），且本機 `appsettings.json` 指向 `localhost`。
 - **改了程式但 Docker 沒生效** → 要加 `--build`：`docker compose up -d --build backend-api`。
-- **k6 壓測查無資料** → 腳本用的是 `M001`，模擬器產生的是 `EQP-001`，改腳本的 `machineIds`。詳見操作手冊第 7 節。
+- **k6 壓測查無資料** → 腳本的 `machineIds` 已對齊 `EQP-001` ~ `EQP-050`；若你改了模擬器的機台命名，記得同步腳本。詳見操作手冊第 7 節。
 
 ---
 

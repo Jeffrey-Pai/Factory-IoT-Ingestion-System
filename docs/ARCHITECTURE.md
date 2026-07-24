@@ -195,7 +195,7 @@ flowchart TB
 
 | 專案 | 角色 | 相依於 | 主要內容 |
 |------|------|--------|----------|
-| **FactoryIoT.Domain** | 核心領域（無任何外部相依） | 無 | 實體 `Telemetry`、`SensorReading`；儲存庫介面 `ITelemetryRepository`、`ISensorReadingRepository` |
+| **FactoryIoT.Domain** | 核心領域（無任何外部相依） | 無 | 實體 `Telemetry`、`SensorReading`；分析 read-model `MachineTelemetrySummary`／`TelemetryStatistics`／`FleetStatus`（`Analytics/`）；儲存庫介面 `ITelemetryRepository`、`ISensorReadingRepository` |
 | **FactoryIoT.Application** | 應用契約 / 使用案例邊界 | Domain | 資料傳輸物件 `SensorReadingDto`；訊息介面 `ITelemetryConsumer`、`IMessagePublisher` |
 | **FactoryIoT.Infrastructure** | 外部技術實作 | Domain、Application | RabbitMQ 消費/發布、`TelemetryIngestionWorker`、EF Core `DbContext` 與 Repository、Migrations |
 | **FactoryIoT.Presentation** | 對外入口（Web API） | Application、Infrastructure | `Program.cs`（Minimal API 端點、DI 註冊、啟動時跑 Migration） |
@@ -330,16 +330,18 @@ erDiagram
 
 Worker 落庫時透過 `SensorReading.FromTelemetry(...)` 把每筆寬表快照拆成正規化讀值（`Temperature`／`Pressure`），對外再由 `GET /api/v1/sensors/{machineId}/readings?sensorType=&count=` 讀回（回應型別為 `SensorReadingDto`）。因此 `SensorReading` 實體、`ISensorReadingRepository`、`SensorReadingRepository`、`SensorReadingDto`、`SensorReadings` 表**現在全都在執行路徑上**。
 
+✅ **監控／分析查詢（read 端）：** `GET /api/v1/machines`、`GET /api/v1/telemetry/{machineId}/stats` 與 `GET /api/v1/fleet/status` 把「機台總覽、單機時間窗統計、全廠健康快照」下推到 SQL Server 以 `GROUP BY` 聚合，回傳 `FactoryIoT.Domain.Analytics` 下的 read-model record（`MachineTelemetrySummary`／`TelemetryStatistics`／`FleetStatus`）。這條 read 路徑只讀 `Telemetries` 表、不參與寫入，因此不影響上面的落庫管線。
+
 🚧 **仍未接上的骨架程式碼：**
 
 - `RabbitMqPublisher`（發布到 `iot.readings` fanout exchange）/ `IMessagePublisher`
 
 這是預留給「另一條獨立發布管線」的擴充點，目前**沒有被任何執行路徑使用**（DI 容器裡也沒有註冊 `IMessagePublisher`）。理解系統時可以先忽略它，聚焦在上面的落庫管線即可。
 
-### 已知的小落差（不影響啟動，但值得知道）
+### 已修正的小落差
 
-- **k6 壓測的機台代號對不上**：`k6-script.js` 打的是 `M001`、`M002`…，但模擬器產生的是 `EQP-001`…。所以壓測會拿到 `200 OK` 但**空陣列**（因為查無資料）。若要測到真實資料，請把 k6 的 `machineIds` 改成 `EQP-001` 這種格式。
-- **`.http` 範例檔** 指向不存在的 `/weatherforecast/`（專案範本殘留），實際端點請見 API 一覽表。
+- **k6 壓測的機台代號**：`k6-script.js` 的 `machineIds` 已對齊模擬器實際產生的 `EQP-001` ~ `EQP-050`，壓測現在會打到真實資料。
+- **`.http` 範例檔**：已從專案範本殘留的 `/weatherforecast/` 改為實際端點（含健康檢查、遙測／感測查詢與下方的分析端點），可直接在 IDE 內點擊發送。
 
 ---
 
