@@ -9,6 +9,7 @@
 | 🛠️ [操作手冊 OPERATIONS.md](./docs/OPERATIONS.md) | 啟動、驗證、監控設定、壓測、故障排除 | 要把系統跑起來、維運 |
 | 👩‍💻 [開發者指南 DEVELOPMENT.md](./docs/DEVELOPMENT.md) | 本機開發、加 API、加 Migration、除錯 | 要改程式碼 |
 | ✅ [驗證指南 VERIFICATION_GUIDE.md](./VERIFICATION_GUIDE.md) | RabbitMQ→MSSQL 資料流驗證與診斷 | 排查資料未入庫問題 |
+| 🖥️ [前端儀表板 frontend/README.md](./frontend/README.md) | React 即時監控儀表板:安裝、開發、Docker | 想看資料視覺化畫面 |
 
 ## 🗺️ 系統一覽
 
@@ -18,6 +19,7 @@ flowchart LR
     MQ --> W["⚙️ Backend Worker<br/>Channel 緩衝 + 批次寫入"]
     W --> DB[("🗄️ SQL Server")]
     API["🌐 REST API"] --> DB
+    DASH["🖥️ 前端儀表板<br/>React + Vite"] --> API
     PROM["📈 Prometheus"] --> API
     GRAF["📊 Grafana"] --> PROM
 ```
@@ -46,6 +48,7 @@ docker-compose ps
 
 ### 2. 驗證服務運行
 
+- **前端儀表板 (Dashboard)**: http://localhost:8081 - 即時監控畫面(主要使用者介面)
 - **RabbitMQ Management UI**: http://localhost:15672 (帳號/密碼: `guest`/`guest`)
 - **SQL Server**: localhost,1433 (帳號/密碼: `sa`/`IoT_Secret123!`) - 可使用 SSMS 管理
 - **Backend API Health**: http://localhost:8080/health
@@ -154,6 +157,7 @@ vus............................: 50      min=50  max=50
 
 ## 📊 架構概覽
 
+- **Frontend Dashboard** (React + Vite): 即時監控儀表板,讀取 REST API 呈現廠區與單機遙測
 - **Backend API** (ASP.NET Core): 提供 REST API 與 Prometheus metrics
 - **Simulator**: 多執行緒模擬 50+ 台設備發送遙測數據
 - **RabbitMQ**: 訊息佇列，處理遙測數據

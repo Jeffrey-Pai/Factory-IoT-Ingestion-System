@@ -1,0 +1,83 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+/*
+ * Design tokens — the single source of truth for chrome & ink colours.
+ * Values come from the validated data-viz reference palette. Each token is stored
+ * as space-separated RGB channels so Tailwind's /opacity modifiers keep working.
+ * The categorical/series hexes used by charts live in src/lib/palette.ts (Recharts
+ * needs literal strings); the two are kept intentionally in sync.
+ */
+:root {
+  color-scheme: light;
+  --canvas: 249 249 247; /* page plane      #f9f9f7 */
+  --surface: 252 252 251; /* cards / charts  #fcfcfb */
+  --surface-2: 244 243 239; /* raised subtle   #f4f3ef */
+  --hairline: 225 224 217; /* gridline/border #e1e0d9 */
+  --ink: 11 11 11; /* primary text    #0b0b0b */
+  --muted: 82 81 78; /* secondary text  #52514e */
+  --faint: 137 135 129; /* axis / labels   #898781 */
+  --brand: 42 120 214; /* accent blue     #2a78d6 */
+
+  /* Fixed status palette — identical hues in both themes. */
+  --good: 12 163 12; /* #0ca30c */
+  --warn: 250 178 25; /* #fab219 */
+  --serious: 236 131 90; /* #ec835a */
+  --critical: 208 59 59; /* #d03b3b */
+}
+
+.dark {
+  color-scheme: dark;
+  --canvas: 13 13 13; /* #0d0d0d */
+  --surface: 26 26 25; /* #1a1a19 */
+  --surface-2: 35 35 33; /* #232321 */
+  --hairline: 44 44 42; /* #2c2c2a */
+  --ink: 255 255 255; /* #ffffff */
+  --muted: 195 194 183; /* #c3c2b7 */
+  --faint: 137 135 129; /* #898781 */
+  --brand: 57 135 229; /* #3987e5 */
+}
+
+html,
+body,
+#root {
+  height: 100%;
+}
+
+body {
+  @apply bg-canvas text-ink font-sans antialiased;
+  font-synthesis-weight: none;
+  text-rendering: optimizeLegibility;
+}
+
+/* Recessive, theme-aware scrollbars. */
+* {
+  scrollbar-width: thin;
+  scrollbar-color: rgb(var(--faint) / 0.5) transparent;
+}
+*::-webkit-scrollbar {
+  width: 10px;
+  height: 10px;
+}
+*::-webkit-scrollbar-thumb {
+  background-color: rgb(var(--faint) / 0.4);
+  border-radius: 9999px;
+  border: 2px solid transparent;
+  background-clip: content-box;
+}
+*::-webkit-scrollbar-thumb:hover {
+  background-color: rgb(var(--faint) / 0.6);
+}
+
+/* Consistent, visible focus ring for keyboard users. */
+:focus-visible {
+  outline: 2px solid rgb(var(--brand));
+  outline-offset: 2px;
+  border-radius: 4px;
+}
+
+/* Numeric columns/ticks that must align vertically. */
+.tabular {
+  font-variant-numeric: tabular-nums;
+}
