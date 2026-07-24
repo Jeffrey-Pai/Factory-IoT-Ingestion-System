@@ -3,11 +3,19 @@ using FactoryIoT.Domain.Entities;
 namespace FactoryIoT.Domain.Interfaces;
 
 /// <summary>
-/// Persistence contract for sensor readings (defined in Domain; implemented in Infrastructure).
+/// Persistence contract for normalized sensor readings (defined in Domain; implemented in Infrastructure).
 /// </summary>
 public interface ISensorReadingRepository
 {
-    Task AddAsync(SensorReading reading, CancellationToken cancellationToken = default);
     Task AddRangeAsync(IEnumerable<SensorReading> readings, CancellationToken cancellationToken = default);
-    Task<IReadOnlyList<SensorReading>> GetByMachineAsync(string machineId, CancellationToken cancellationToken = default);
+
+    /// <summary>
+    /// Returns the most recent readings for a machine, newest first, optionally filtered to a
+    /// single <paramref name="sensorType"/> (case-insensitive; null/blank returns all types).
+    /// </summary>
+    Task<IReadOnlyList<SensorReading>> GetLatestAsync(
+        string machineId,
+        string? sensorType,
+        int count,
+        CancellationToken cancellationToken = default);
 }

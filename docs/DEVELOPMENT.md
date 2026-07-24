@@ -195,9 +195,16 @@ app.MapGet("/api/v1/telemetry/{machineId}/stats", async (
 
 批次大小、間隔、prefetch、重試次數等都集中在 `TelemetryIngestionWorker` 的常數與 `RabbitMqTelemetryConsumer.PrefetchCount`。參數清單見 [操作手冊第 11 節](./OPERATIONS.md#11-設定參數速查)。
 
-### 6.4 接上目前未使用的 SensorReading 路徑
+### 6.4 SensorReading 路徑（已接上）
 
-`RabbitMqPublisher`（`iot.readings` fanout）、`ISensorReadingRepository`、`InMemorySensorReadingRepository` 是預留骨架，目前**未在 DI 註冊、無執行路徑**。若要啟用，需要在 `Program.cs` 註冊對應服務並建立消費端。詳見 [架構文件第 11 節](./ARCHITECTURE.md#11-架構備註實際運作-vs-骨架程式碼)。
+`SensorReading` 現在是正規化的每感測器時序儲存，**已在執行路徑上**：
+
+- Worker 在 `FlushBatchAsync` 中呼叫 `SensorReading.FromTelemetry(telemetry)`，把每筆寬表 `Telemetry` 拆成多筆讀值，與 `Telemetry` 在**同一交易**裡寫入 `SensorReadings` 表（`SensorReadingRepository`，於 `Program.cs` 以 `Scoped` 註冊）。
+- 對外端點：`GET /api/v1/sensors/{machineId}/readings?sensorType=<Temperature|Pressure>&count=<1-100>`，回應型別 `SensorReadingDto`。
+
+要新增感測器類型時，只要在 `SensorReading.FromTelemetry` 多產生一筆讀值即可，**免改資料庫 schema**（narrow/EAV 形態的好處）。
+
+> 仍未接上的骨架：`RabbitMqPublisher`（`iot.readings` fanout）／`IMessagePublisher` 這條獨立發布管線未在 DI 註冊。詳見 [架構文件第 11 節](./ARCHITECTURE.md#11-架構備註實際運作-vs-骨架程式碼)。
 
 ---
 

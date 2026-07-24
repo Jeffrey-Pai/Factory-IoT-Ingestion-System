@@ -1,4 +1,5 @@
 using FactoryIoT.Application.Common.Interfaces;
+using FactoryIoT.Application.DTOs;
 using FactoryIoT.Domain.Interfaces;
 using FactoryIoT.Infrastructure.Messaging;
 using FactoryIoT.Infrastructure.Persistence;
@@ -22,6 +23,7 @@ builder.Services.AddDbContext<FactoryIoTDbContext>(options =>
 
 // Register repositories
 builder.Services.AddScoped<ITelemetryRepository, TelemetryRepository>();
+builder.Services.AddScoped<ISensorReadingRepository, SensorReadingRepository>();
 
 // Register RabbitMQ connection configuration (host/port/credentials).
 //
@@ -130,6 +132,29 @@ app.MapGet("/api/v1/telemetry/{machineId}/latest", async (
     return Results.Ok(telemetries);
 })
 .WithName("GetLatestTelemetry")
+.WithOpenApi();
+
+// Normalized per-sensor readings endpoint. Unlike the wide /telemetry snapshot, this can
+// answer per-sensor questions — e.g. the last N Pressure readings for a machine — via the
+// optional sensorType filter (Temperature, Pressure, ...).
+app.MapGet("/api/v1/sensors/{machineId}/readings", async (
+    string machineId,
+    int count,
+    string? sensorType,
+    ISensorReadingRepository repository) =>
+{
+    if (count <= 0 || count > 100)
+    {
+        return Results.BadRequest(new { error = "count must be between 1 and 100" });
+    }
+
+    var readings = await repository.GetLatestAsync(machineId, sensorType, count);
+    var response = readings
+        .Select(r => new SensorReadingDto(r.MachineId, r.SensorType, r.Value, r.Unit, r.Timestamp))
+        .ToList();
+    return Results.Ok(response);
+})
+.WithName("GetLatestSensorReadings")
 .WithOpenApi();
 
 app.Run();

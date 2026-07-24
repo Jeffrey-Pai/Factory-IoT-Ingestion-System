@@ -262,7 +262,9 @@ erDiagram
 ```
 
 - 兩張表都在 `(MachineId, Timestamp)` 上建立**複合索引**，正好對應「查某台機台最新 N 筆（依時間倒序）」的查詢模式。
-- **實務上運作的只有 `Telemetries`**（見下方「架構備註」）。
+- **兩張表現在都會即時寫入**：Worker 每次批次落庫時，會把每筆寬表 `Telemetry`（溫度、壓力）拆解成正規化的 `SensorReading`（每個感測器一列），在**同一個交易**裡同時寫進 `Telemetries` 與 `SensorReadings`，兩表資料因此保持一致（見下方「架構備註」）。
+  - `Telemetries`：一台機台某一瞬間的**寬表快照**（一列含所有指標）。
+  - `SensorReadings`：**正規化的每感測器時序**，可回答寬表答不了的問題，例如「給我 EQP-001 最近 20 筆壓力讀值」，且新增感測器類型時免改 schema。
 
 ---
 
@@ -273,7 +275,8 @@ erDiagram
 | 指標名稱 | 型別 | 意義 |
 |----------|------|------|
 | `telemetry_consumed_total` | Counter | 從 RabbitMQ 消費的訊息總數 |
-| `telemetry_written_total` | Counter | 成功寫入資料庫的記錄總數 |
+| `telemetry_written_total` | Counter | 成功寫入 `Telemetries` 的記錄總數 |
+| `sensor_readings_written_total` | Counter | 成功寫入 `SensorReadings` 的正規化讀值總數（每筆 Telemetry 拆成多筆） |
 | `telemetry_failed_total` | Counter | 重試後仍寫入失敗（資料遺失）的記錄總數 |
 | `telemetry_batch_processing_seconds` | Histogram | 每批次寫入耗時分布 |
 
@@ -322,17 +325,16 @@ erDiagram
 
 為了讓你完全清楚「哪些程式碼是真的在跑」，這裡誠實標註：
 
-✅ **實際在運作的管線（Telemetry 路徑）：**
-`Simulator` → `telemetry-queue`（default exchange）→ `RabbitMqTelemetryConsumer` → `Channel` → `TelemetryIngestionWorker` → `TelemetryRepository` → `Telemetries` 表。
+✅ **實際在運作的管線（Telemetry + SensorReading 落庫）：**
+`Simulator` → `telemetry-queue`（default exchange）→ `RabbitMqTelemetryConsumer` → `Channel` → `TelemetryIngestionWorker` → **同一交易**中 `TelemetryRepository` → `Telemetries` 表**且** `SensorReadingRepository` → `SensorReadings` 表。
 
-🚧 **目前未接上的骨架程式碼（SensorReading 路徑）：**
+Worker 落庫時透過 `SensorReading.FromTelemetry(...)` 把每筆寬表快照拆成正規化讀值（`Temperature`／`Pressure`），對外再由 `GET /api/v1/sensors/{machineId}/readings?sensorType=&count=` 讀回（回應型別為 `SensorReadingDto`）。因此 `SensorReading` 實體、`ISensorReadingRepository`、`SensorReadingRepository`、`SensorReadingDto`、`SensorReadings` 表**現在全都在執行路徑上**。
 
-- `RabbitMqPublisher`（發布到 `iot.readings` fanout exchange）
-- `InMemorySensorReadingRepository`
-- `ISensorReadingRepository` / `IMessagePublisher` / `SensorReadingDto`
-- `SensorReadings` 資料表
+🚧 **仍未接上的骨架程式碼：**
 
-這些是預留給「另一種感測器讀值模型」的擴充點，目前**沒有被任何執行路徑使用**（DI 容器裡也沒有註冊 `IMessagePublisher` / `ISensorReadingRepository`）。理解系統時可以先忽略它們，聚焦在 Telemetry 路徑即可。
+- `RabbitMqPublisher`（發布到 `iot.readings` fanout exchange）/ `IMessagePublisher`
+
+這是預留給「另一條獨立發布管線」的擴充點，目前**沒有被任何執行路徑使用**（DI 容器裡也沒有註冊 `IMessagePublisher`）。理解系統時可以先忽略它，聚焦在上面的落庫管線即可。
 
 ### 已知的小落差（不影響啟動，但值得知道）
 
