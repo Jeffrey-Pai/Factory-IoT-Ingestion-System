@@ -6,4 +6,7 @@
     <Project Path="src/FactoryIoT.Presentation/FactoryIoT.Presentation.csproj" />
     <Project Path="src/FactoryIoT.Simulator/FactoryIoT.Simulator.csproj" />
   </Folder>
+  <Folder Name="/tests/">
+    <Project Path="tests/FactoryIoT.Tests/FactoryIoT.Tests.csproj" />
+  </Folder>
 </Solution>

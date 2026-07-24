@@ -16,10 +16,11 @@ export const options = {
   },
 };
 
-// Machine IDs to test (simulating multiple machines)
+// Machine IDs to test. These MUST match what the simulator publishes (EQP-001 ~ EQP-050),
+// otherwise the API returns 200 with an empty array and the test never touches real data.
 const machineIds = [
-  'M001', 'M002', 'M003', 'M004', 'M005',
-  'M010', 'M015', 'M020', 'M025', 'M030',
+  'EQP-001', 'EQP-002', 'EQP-003', 'EQP-004', 'EQP-005',
+  'EQP-010', 'EQP-015', 'EQP-020', 'EQP-025', 'EQP-030',
 ];
 
 export default function () {

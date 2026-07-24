@@ -163,6 +163,20 @@ vus............................: 50      min=50  max=50
 
 > 📐 完整的架構圖（系統情境圖、容器部署圖、資料流時序圖、Clean Architecture 分層圖、Worker 狀態機）與技術決策說明，請見 **[docs/ARCHITECTURE.md](./docs/ARCHITECTURE.md)**。
 
+## 🔌 主要 API 端點
+
+| 方法 | 路徑 | 說明 |
+|------|------|------|
+| GET | `/health` · `/health/worker` | 存活檢查 / Worker 詳細狀態（不健康回 503） |
+| GET | `/api/v1/telemetry/{machineId}/latest?count=N` | 某台機台最新 N 筆寬表快照 |
+| GET | `/api/v1/sensors/{machineId}/readings?count=N&sensorType=` | 某台機台最新 N 筆正規化感測讀值（可依感測器類型篩選） |
+| GET | `/api/v1/machines` | **機台總覽**：每台一列彙總（樣本數、首/末回報、溫度與壓力 min/max/avg） |
+| GET | `/api/v1/telemetry/{machineId}/stats?windowMinutes=N` | **單機統計**：最近 N 分鐘（預設 60）的聚合；查無資料回 404 |
+| GET | `/api/v1/fleet/status?windowMinutes=N` | **全廠健康快照**：回報機台數、總讀值數、狀態分佈 |
+| GET | `/metrics` · `/swagger` | Prometheus 指標 / Swagger UI（僅開發環境） |
+
+> 端點細節、curl 範例與參數限制見 **[操作手冊 OPERATIONS.md](./docs/OPERATIONS.md#api-端點一覽)**；`src/FactoryIoT.Presentation/FactoryIoT.Presentation.http` 可在 IDE 內直接點擊發送。
+
 ## 🔧 使用 SQL Server Management Studio (SSMS)
 
 您可以使用 SSMS 連接到 SQL Server 容器：
