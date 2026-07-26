@@ -43,6 +43,29 @@ public sealed class TelemetryIngestionWorker : BackgroundService
         "telemetry_batch_processing_seconds",
         "Time taken to process and insert a batch of telemetry records");
 
+    // ── Worker liveness gauges ──────────────────────────────────────────────────
+    // The counters above only ever say how much work *did* happen. When the worker
+    // stalls they simply stop moving, which is indistinguishable from "the factory
+    // went quiet" until you correlate against the queue depth. These gauges give
+    // Prometheus a direct answer instead, and are what the Grafana alert rules in
+    // grafana/provisioning/alerting key off (see docs/MONITORING.md).
+
+    private static readonly Gauge WorkerHealthyGauge = Metrics.CreateGauge(
+        "telemetry_worker_healthy",
+        "1 when the worker is connected to RabbitMQ and its batch processor is running, 0 otherwise");
+
+    private static readonly Gauge WorkerBufferDepthGauge = Metrics.CreateGauge(
+        "telemetry_worker_buffer_depth",
+        "Telemetry messages taken off RabbitMQ but still waiting in the in-process channel buffer");
+
+    private static readonly Gauge LastMessageTimestampGauge = Metrics.CreateGauge(
+        "telemetry_worker_last_message_timestamp_seconds",
+        "Unix timestamp of the last telemetry message received from RabbitMQ (0 when none received yet)");
+
+    private static readonly Gauge LastFlushTimestampGauge = Metrics.CreateGauge(
+        "telemetry_worker_last_flush_timestamp_seconds",
+        "Unix timestamp of the last batch successfully written to the database (0 when none written yet)");
+
     private readonly RabbitMqConfig _rabbitConfig;
     private readonly IServiceScopeFactory _scopeFactory;
     private readonly ILogger<TelemetryIngestionWorker> _logger;
@@ -55,10 +78,35 @@ public sealed class TelemetryIngestionWorker : BackgroundService
     private bool _isProcessing;
     private DateTimeOffset? _lastMessageReceived;
     private DateTimeOffset? _lastBatchFlushed;
-    
-    public bool IsHealthy => _isConnected && _isProcessing;
+
+    // Written through properties rather than the raw fields so telemetry_worker_healthy
+    // can never drift out of sync with what /health/worker reports: every state change
+    // goes through one place that republishes the gauge.
+    private bool IsConnected
+    {
+        get => _isConnected;
+        set
+        {
+            _isConnected = value;
+            WorkerHealthyGauge.Set(IsHealthy ? 1 : 0);
+        }
+    }
+
+    private bool IsProcessing
+    {
+        get => _isProcessing;
+        set
+        {
+            _isProcessing = value;
+            WorkerHealthyGauge.Set(IsHealthy ? 1 : 0);
+        }
+    }
+
+    public bool IsHealthy => IsConnected && IsProcessing;
     public DateTimeOffset? LastMessageReceived => _lastMessageReceived;
     public DateTimeOffset? LastBatchFlushed => _lastBatchFlushed;
+
+    private static double UnixSecondsNow() => DateTimeOffset.UtcNow.ToUnixTimeMilliseconds() / 1000d;
 
     public TelemetryIngestionWorker(
         RabbitMqConfig rabbitConfig,
@@ -108,7 +156,7 @@ public sealed class TelemetryIngestionWorker : BackgroundService
                 // Connect to RabbitMQ, retrying indefinitely so a slow/unreachable broker
                 // never permanently kills ingestion (or, previously, the whole API process).
                 _consumer = await ConnectToRabbitMqWithRetryAsync(stoppingToken);
-                _isConnected = true;
+                IsConnected = true;
 
                 // Start consuming from RabbitMQ
                 _logger.LogInformation("Starting RabbitMQ consumer...");
@@ -117,7 +165,7 @@ public sealed class TelemetryIngestionWorker : BackgroundService
 
                 // Start batch processor. This only returns on cancellation or on an
                 // unrecoverable error (which it now rethrows instead of swallowing).
-                _isProcessing = true;
+                IsProcessing = true;
                 _logger.LogInformation("Starting batch processor...");
                 await ProcessBatchesAsync(stoppingToken);
             }
@@ -128,8 +176,8 @@ public sealed class TelemetryIngestionWorker : BackgroundService
             }
             catch (Exception ex)
             {
-                _isConnected = false;
-                _isProcessing = false;
+                IsConnected = false;
+                IsProcessing = false;
                 _logger.LogCritical(ex,
                     "Telemetry Ingestion Worker pipeline failed unexpectedly. Ingestion paused; " +
                     "/health/worker will report unhealthy until it reconnects in {DelaySeconds}s.",
@@ -186,7 +234,8 @@ public sealed class TelemetryIngestionWorker : BackgroundService
     {
         TelemetriesConsumedCounter.Inc();
         _lastMessageReceived = DateTimeOffset.UtcNow;
-        
+        LastMessageTimestampGauge.Set(UnixSecondsNow());
+
         if (_logger.IsEnabled(LogLevel.Debug))
         {
             _logger.LogDebug("Received telemetry from {MachineId}: Temp={Temperature}, Pressure={Pressure}, Status={Status}", 
@@ -194,6 +243,11 @@ public sealed class TelemetryIngestionWorker : BackgroundService
         }
         
         await _channel.Writer.WriteAsync(telemetry);
+
+        // Buffer depth separates "RabbitMQ is backed up because nothing is consuming"
+        // from "we are consuming fine but the database can't keep up" — in the second
+        // case the queue drains into this in-process buffer instead.
+        WorkerBufferDepthGauge.Set(_channel.Reader.Count);
     }
 
     private async Task ProcessBatchesAsync(CancellationToken stoppingToken)
@@ -264,7 +318,7 @@ public sealed class TelemetryIngestionWorker : BackgroundService
         catch (Exception ex)
         {
             _logger.LogError(ex, "Error in batch processing loop. Propagating so the pipeline restarts.");
-            _isProcessing = false;
+            IsProcessing = false;
             throw;
         }
     }
@@ -307,6 +361,8 @@ public sealed class TelemetryIngestionWorker : BackgroundService
                 SensorReadingsWrittenCounter.Inc(sensorReadings.Count);
                 BatchProcessingHistogram.Observe(stopwatch.Elapsed.TotalSeconds);
                 _lastBatchFlushed = DateTimeOffset.UtcNow;
+                LastFlushTimestampGauge.Set(UnixSecondsNow());
+                WorkerBufferDepthGauge.Set(_channel.Reader.Count);
 
                 _logger.LogInformation("✓ Successfully saved {Count} telemetry records and {SensorReadingCount} sensor readings to MSSQL in {ElapsedMs}ms",
                     batch.Count, sensorReadings.Count, stopwatch.ElapsedMilliseconds);
@@ -335,8 +391,8 @@ public sealed class TelemetryIngestionWorker : BackgroundService
     public override async Task StopAsync(CancellationToken cancellationToken)
     {
         _logger.LogInformation("Stopping Telemetry Ingestion Worker...");
-        _isProcessing = false;
-        _isConnected = false;
+        IsProcessing = false;
+        IsConnected = false;
         
         if (_consumer != null)
         {

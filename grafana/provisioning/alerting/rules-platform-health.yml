@@ -1,0 +1,563 @@
+# 告警規則:服務與 Broker 可用性
+#
+# 由 Grafana 的 alerting provisioning 自動載入 —— 開機就存在,不必在 UI 裡建。
+# Provisioning 進來的規則在 UI 上是**唯讀**的,要調整就改這個檔案再
+# `docker compose restart grafana`。
+#
+# ── 怎麼調門檻 ───────────────────────────────────────────────────────────────
+# 每條規則的 data 都是固定的三段:
+#   A = PromQL 查詢(instant)   B = 取最後一個值   C = 比門檻
+# 所以「門檻」永遠在該規則 data 陣列最後一段(refId: C)的
+#   conditions[0].evaluator.params[0]
+# 「要撐多久才真的燒起來」則是規則層級的 `for`。
+# 各規則的門檻與理由整理在 docs/MONITORING.md。
+#
+# ── noDataState 的取捨 ───────────────────────────────────────────────────────
+# 大部分規則設 OK:指標消失(例如服務整個掛掉)時不重複燒同一件事,
+# 改由 fiot-rabbitmq-down / fiot-backend-down 這兩條(noDataState: Alerting)兜底,
+# 避免一次故障同時噴出十幾封通知。
+apiVersion: 1
+
+groups:
+- orgId: 1
+  name: platform-health
+  folder: Factory IoT
+  interval: 1m
+  rules:
+  - uid: fiot-rabbitmq-down
+    title: RabbitMQ 指標抓不到｜broker 可能已停止
+    condition: C
+    data:
+    - refId: A
+      relativeTimeRange:
+        from: 600
+        to: 0
+      datasourceUid: factory-iot-prometheus
+      model:
+        datasource:
+          type: prometheus
+          uid: factory-iot-prometheus
+        editorMode: code
+        expr: up{job="rabbitmq"}
+        instant: true
+        range: false
+        intervalMs: 1000
+        maxDataPoints: 43200
+        legendFormat: __auto
+        refId: A
+    - refId: B
+      relativeTimeRange:
+        from: 600
+        to: 0
+      datasourceUid: __expr__
+      model:
+        datasource:
+          type: __expr__
+          uid: __expr__
+        conditions:
+        - evaluator:
+            params: []
+            type: gt
+          operator:
+            type: and
+          query:
+            params:
+            - B
+          reducer:
+            params: []
+            type: last
+          type: query
+        expression: A
+        reducer: last
+        type: reduce
+        intervalMs: 1000
+        maxDataPoints: 43200
+        refId: B
+    - refId: C
+      relativeTimeRange:
+        from: 600
+        to: 0
+      datasourceUid: __expr__
+      model:
+        datasource:
+          type: __expr__
+          uid: __expr__
+        conditions:
+        - evaluator:
+            params:
+            - 1
+            type: lt
+          operator:
+            type: and
+          query:
+            params:
+            - C
+          reducer:
+            params: []
+            type: last
+          type: query
+        expression: B
+        type: threshold
+        intervalMs: 1000
+        maxDataPoints: 43200
+        refId: C
+    noDataState: Alerting
+    execErrState: Error
+    for: 2m
+    annotations:
+      summary: Prometheus 抓不到 rabbitmq:15692 的指標
+      description: broker 掛掉時所有佇列指標都會消失,其他積壓告警會跟著變成 NoData 而靜音 —— 所以這條規則是整組告警的兜底,它的 NoData 行為特別設成直接告警。
+      runbook: 1) docker compose ps rabbitmq / docker compose logs rabbitmq。2) 到 http://localhost:9090/targets
+        看 rabbitmq target 的錯誤訊息。3) curl http://localhost:15692/metrics 確認 prometheus plugin 有在服務。
+    labels:
+      service: factory-iot
+      severity: critical
+      component: rabbitmq
+    isPaused: false
+  - uid: fiot-backend-down
+    title: Backend API 指標抓不到｜Worker 一定沒在消化
+    condition: C
+    data:
+    - refId: A
+      relativeTimeRange:
+        from: 600
+        to: 0
+      datasourceUid: factory-iot-prometheus
+      model:
+        datasource:
+          type: prometheus
+          uid: factory-iot-prometheus
+        editorMode: code
+        expr: up{job="backend-api"}
+        instant: true
+        range: false
+        intervalMs: 1000
+        maxDataPoints: 43200
+        legendFormat: __auto
+        refId: A
+    - refId: B
+      relativeTimeRange:
+        from: 600
+        to: 0
+      datasourceUid: __expr__
+      model:
+        datasource:
+          type: __expr__
+          uid: __expr__
+        conditions:
+        - evaluator:
+            params: []
+            type: gt
+          operator:
+            type: and
+          query:
+            params:
+            - B
+          reducer:
+            params: []
+            type: last
+          type: query
+        expression: A
+        reducer: last
+        type: reduce
+        intervalMs: 1000
+        maxDataPoints: 43200
+        refId: B
+    - refId: C
+      relativeTimeRange:
+        from: 600
+        to: 0
+      datasourceUid: __expr__
+      model:
+        datasource:
+          type: __expr__
+          uid: __expr__
+        conditions:
+        - evaluator:
+            params:
+            - 1
+            type: lt
+          operator:
+            type: and
+          query:
+            params:
+            - C
+          reducer:
+            params: []
+            type: last
+          type: query
+        expression: B
+        type: threshold
+        intervalMs: 1000
+        maxDataPoints: 43200
+        refId: C
+    noDataState: Alerting
+    execErrState: Error
+    for: 2m
+    annotations:
+      summary: Prometheus 抓不到 backend-api:8080 的指標
+      description: backend-api 同時是 REST API 與 Worker 的宿主。它抓不到就代表沒有人在消化佇列,MQ 會從這一刻開始一路累積。
+      runbook: 1) docker compose ps backend-api / docker compose logs --tail=100 backend-api。2) 啟動時 Migration
+        失敗會讓整個 process 直接結束,log 第一段就看得出來。
+    labels:
+      service: factory-iot
+      severity: critical
+      component: api
+    isPaused: false
+  - uid: fiot-rabbitmq-memory-alarm
+    title: RabbitMQ 記憶體水位告警｜broker 已開始擋住發布端
+    condition: C
+    data:
+    - refId: A
+      relativeTimeRange:
+        from: 600
+        to: 0
+      datasourceUid: factory-iot-prometheus
+      model:
+        datasource:
+          type: prometheus
+          uid: factory-iot-prometheus
+        editorMode: code
+        expr: max(rabbitmq_alarms_memory_used_watermark)
+        instant: true
+        range: false
+        intervalMs: 1000
+        maxDataPoints: 43200
+        legendFormat: __auto
+        refId: A
+    - refId: B
+      relativeTimeRange:
+        from: 600
+        to: 0
+      datasourceUid: __expr__
+      model:
+        datasource:
+          type: __expr__
+          uid: __expr__
+        conditions:
+        - evaluator:
+            params: []
+            type: gt
+          operator:
+            type: and
+          query:
+            params:
+            - B
+          reducer:
+            params: []
+            type: last
+          type: query
+        expression: A
+        reducer: last
+        type: reduce
+        intervalMs: 1000
+        maxDataPoints: 43200
+        refId: B
+    - refId: C
+      relativeTimeRange:
+        from: 600
+        to: 0
+      datasourceUid: __expr__
+      model:
+        datasource:
+          type: __expr__
+          uid: __expr__
+        conditions:
+        - evaluator:
+            params:
+            - 0
+            type: gt
+          operator:
+            type: and
+          query:
+            params:
+            - C
+          reducer:
+            params: []
+            type: last
+          type: query
+        expression: B
+        type: threshold
+        intervalMs: 1000
+        maxDataPoints: 43200
+        refId: C
+    noDataState: OK
+    execErrState: Error
+    for: 1m
+    annotations:
+      summary: RabbitMQ 觸發記憶體高水位警報
+      description: broker 記憶體用量超過水位,RabbitMQ 會阻擋 publisher 以自保。在這個系統裡,幾乎都是積壓太久把訊息堆在記憶體造成的 —— 屬於積壓的後果,不是獨立問題。
+      runbook: 1) 先處理積壓根因(通常是 Worker 沒消化 / DB 掛掉)。2) docker compose exec rabbitmq rabbitmq-diagnostics
+        status 看記憶體明細。
+    labels:
+      service: factory-iot
+      severity: critical
+      component: rabbitmq
+    isPaused: false
+  - uid: fiot-rabbitmq-disk-alarm
+    title: RabbitMQ 磁碟空間告警｜broker 已開始擋住發布端
+    condition: C
+    data:
+    - refId: A
+      relativeTimeRange:
+        from: 600
+        to: 0
+      datasourceUid: factory-iot-prometheus
+      model:
+        datasource:
+          type: prometheus
+          uid: factory-iot-prometheus
+        editorMode: code
+        expr: max(rabbitmq_alarms_free_disk_space_watermark)
+        instant: true
+        range: false
+        intervalMs: 1000
+        maxDataPoints: 43200
+        legendFormat: __auto
+        refId: A
+    - refId: B
+      relativeTimeRange:
+        from: 600
+        to: 0
+      datasourceUid: __expr__
+      model:
+        datasource:
+          type: __expr__
+          uid: __expr__
+        conditions:
+        - evaluator:
+            params: []
+            type: gt
+          operator:
+            type: and
+          query:
+            params:
+            - B
+          reducer:
+            params: []
+            type: last
+          type: query
+        expression: A
+        reducer: last
+        type: reduce
+        intervalMs: 1000
+        maxDataPoints: 43200
+        refId: B
+    - refId: C
+      relativeTimeRange:
+        from: 600
+        to: 0
+      datasourceUid: __expr__
+      model:
+        datasource:
+          type: __expr__
+          uid: __expr__
+        conditions:
+        - evaluator:
+            params:
+            - 0
+            type: gt
+          operator:
+            type: and
+          query:
+            params:
+            - C
+          reducer:
+            params: []
+            type: last
+          type: query
+        expression: B
+        type: threshold
+        intervalMs: 1000
+        maxDataPoints: 43200
+        refId: C
+    noDataState: OK
+    execErrState: Error
+    for: 1m
+    annotations:
+      summary: RabbitMQ 觸發磁碟可用空間低水位警報
+      description: 可用磁碟低於水位。佇列是 durable 的,積壓的訊息會落到磁碟,積得夠久就會把空間吃光,broker 隨即停止接受發布。
+      runbook: 1) docker system df,必要時清掉舊 image / volume。2) 同樣要回頭解決積壓本身。
+    labels:
+      service: factory-iot
+      severity: critical
+      component: rabbitmq
+    isPaused: false
+  - uid: fiot-rabbitmq-fd-alarm
+    title: RabbitMQ 檔案描述符不足
+    condition: C
+    data:
+    - refId: A
+      relativeTimeRange:
+        from: 600
+        to: 0
+      datasourceUid: factory-iot-prometheus
+      model:
+        datasource:
+          type: prometheus
+          uid: factory-iot-prometheus
+        editorMode: code
+        expr: max(rabbitmq_alarms_file_descriptor_limit)
+        instant: true
+        range: false
+        intervalMs: 1000
+        maxDataPoints: 43200
+        legendFormat: __auto
+        refId: A
+    - refId: B
+      relativeTimeRange:
+        from: 600
+        to: 0
+      datasourceUid: __expr__
+      model:
+        datasource:
+          type: __expr__
+          uid: __expr__
+        conditions:
+        - evaluator:
+            params: []
+            type: gt
+          operator:
+            type: and
+          query:
+            params:
+            - B
+          reducer:
+            params: []
+            type: last
+          type: query
+        expression: A
+        reducer: last
+        type: reduce
+        intervalMs: 1000
+        maxDataPoints: 43200
+        refId: B
+    - refId: C
+      relativeTimeRange:
+        from: 600
+        to: 0
+      datasourceUid: __expr__
+      model:
+        datasource:
+          type: __expr__
+          uid: __expr__
+        conditions:
+        - evaluator:
+            params:
+            - 0
+            type: gt
+          operator:
+            type: and
+          query:
+            params:
+            - C
+          reducer:
+            params: []
+            type: last
+          type: query
+        expression: B
+        type: threshold
+        intervalMs: 1000
+        maxDataPoints: 43200
+        refId: C
+    noDataState: OK
+    execErrState: Error
+    for: 1m
+    annotations:
+      summary: RabbitMQ 觸發 file descriptor 上限警報
+      description: broker 的 fd 快用完,新連線會開始失敗。通常是連線沒有正常關閉造成的洩漏。
+      runbook: 1) 管理 UI(:15672)→ Connections,看連線數是不是異常成長。2) 檢查有沒有客戶端反覆重連但沒關掉舊連線。
+    labels:
+      service: factory-iot
+      severity: warning
+      component: rabbitmq
+    isPaused: false
+  - uid: fiot-api-5xx
+    title: API 5xx 錯誤率偏高
+    condition: C
+    data:
+    - refId: A
+      relativeTimeRange:
+        from: 600
+        to: 0
+      datasourceUid: factory-iot-prometheus
+      model:
+        datasource:
+          type: prometheus
+          uid: factory-iot-prometheus
+        editorMode: code
+        expr: sum(rate(http_requests_received_total{code=~"5.."}[5m]))
+        instant: true
+        range: false
+        intervalMs: 1000
+        maxDataPoints: 43200
+        legendFormat: __auto
+        refId: A
+    - refId: B
+      relativeTimeRange:
+        from: 600
+        to: 0
+      datasourceUid: __expr__
+      model:
+        datasource:
+          type: __expr__
+          uid: __expr__
+        conditions:
+        - evaluator:
+            params: []
+            type: gt
+          operator:
+            type: and
+          query:
+            params:
+            - B
+          reducer:
+            params: []
+            type: last
+          type: query
+        expression: A
+        reducer: last
+        type: reduce
+        intervalMs: 1000
+        maxDataPoints: 43200
+        refId: B
+    - refId: C
+      relativeTimeRange:
+        from: 600
+        to: 0
+      datasourceUid: __expr__
+      model:
+        datasource:
+          type: __expr__
+          uid: __expr__
+        conditions:
+        - evaluator:
+            params:
+            - 0.05
+            type: gt
+          operator:
+            type: and
+          query:
+            params:
+            - C
+          reducer:
+            params: []
+            type: last
+          type: query
+        expression: B
+        type: threshold
+        intervalMs: 1000
+        maxDataPoints: 43200
+        refId: C
+    noDataState: OK
+    execErrState: Error
+    for: 5m
+    annotations:
+      summary: REST API 每秒回超過 0.05 個 5xx
+      description: 查詢端在噴 5xx。跟消化管線是兩回事,但同一個資料庫出問題時兩邊會一起壞,所以放在同一組一起看。目前錯誤率:{{ $values.B.Value }} 次/秒。
+      runbook: 1) docker compose logs backend-api | grep -i exception。2) 對照〈API P95 延遲〉與資料庫狀態。
+    labels:
+      service: factory-iot
+      severity: warning
+      component: api
+    isPaused: false

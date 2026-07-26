@@ -46,8 +46,9 @@ flowchart LR
     MQ -- "消費訊息" --> W
     W -- "批次 INSERT" --> DB
     API -- "查詢最新資料" --> DB
-    PROM -- "每 15s 抓 /metrics" --> API
-    GRAF -- "查詢指標" --> PROM
+    PROM -- "每 15s 抓 /metrics<br/>（消化了多少）" --> API
+    PROM -- "每 15s 抓 :15692/metrics<br/>（還剩多少沒消化）" --> MQ
+    GRAF -- "查詢指標 → 儀表板 + 告警" --> PROM
     K6 -- "打 API 壓測" --> API
     USER -- "查資料 / 呼叫 API" --> API
     USER -- "直連查資料" --> DB
@@ -77,9 +78,10 @@ flowchart TB
     B --> R
     B --> S
     P --> B
+    P --> R
     G --> P
 
-    R -.->|"5672 / 15672"| host
+    R -.->|"5672 / 15672 / 15692"| host
     S -.->|"1433"| host
     B -.->|"8080"| host
     P -.->|"9090"| host
@@ -90,12 +92,12 @@ flowchart TB
 
 | 容器 | 對外埠 | 用途 | 依賴（depends_on） |
 |------|--------|------|--------------------|
-| `rabbitmq` | 5672 (AMQP) / 15672 (管理 UI) | 訊息佇列 | — |
+| `rabbitmq` | 5672 (AMQP) / 15672 (管理 UI) / 15692 (`/metrics`) | 訊息佇列 | — |
 | `mssql` | 1433 | 關聯式資料庫 | — |
 | `backend-api` | 8080 | REST API + `/metrics` | rabbitmq、mssql（healthy 後才啟動） |
 | `simulator` | —（不對外） | 產生遙測資料 | rabbitmq（healthy 後才啟動） |
-| `prometheus` | 9090 | 指標收集 | — |
-| `grafana` | 3000 | 監控儀表板 | prometheus |
+| `prometheus` | 9090 | 指標收集（backend-api + rabbitmq） | — |
+| `grafana` | 3000 | 監控儀表板 + 告警（由 `grafana/` provisioning） | prometheus |
 
 > `rabbitmq` 與 `mssql` 都設定了 `healthcheck`，`backend-api` / `simulator` 會等它們變成 healthy 後才啟動，避免競態（race condition）。
 
@@ -270,7 +272,17 @@ erDiagram
 
 ## 8. 可觀測性（Observability）
 
-系統透過 `prometheus-net` 暴露以下自訂指標，Prometheus 每 15 秒抓一次 `backend-api:8080/metrics`：
+Prometheus 每 15 秒抓**兩個**目標。這一點是刻意的設計，不是重複：
+
+| 目標 | 端點 | 回答什麼問題 |
+|------|------|--------------|
+| `backend-api` | `backend-api:8080/metrics` | 消化端**做了多少**（消費、入庫、失敗、延遲） |
+| `rabbitmq` | `rabbitmq:15692/metrics` | 佇列裡**還剩多少**、有沒有人在消費 |
+
+> ⚠️ 只抓其中一個是看不出積壓的。Worker 完全停擺時，`telemetry_*` 只會停止增長 ——
+> 跟「工廠今天沒開工」的訊號一模一樣。要區分兩者，非得同時知道 broker 端還有多少在排隊不可。
+
+### 8.1 應用層指標（`prometheus-net`）
 
 | 指標名稱 | 型別 | 意義 |
 |----------|------|------|
@@ -279,10 +291,43 @@ erDiagram
 | `sensor_readings_written_total` | Counter | 成功寫入 `SensorReadings` 的正規化讀值總數（每筆 Telemetry 拆成多筆） |
 | `telemetry_failed_total` | Counter | 重試後仍寫入失敗（資料遺失）的記錄總數 |
 | `telemetry_batch_processing_seconds` | Histogram | 每批次寫入耗時分布 |
+| `telemetry_worker_healthy` | Gauge | 1 = 已連上 MQ 且批次處理迴圈在跑（等同 `/health/worker` 的 `isHealthy`） |
+| `telemetry_worker_buffer_depth` | Gauge | 已消化、但還沒寫進資料庫的 Channel 緩衝深度 |
+| `telemetry_worker_last_message_timestamp_seconds` | Gauge | 上次收到訊息的 Unix 時間 |
+| `telemetry_worker_last_flush_timestamp_seconds` | Gauge | 上次成功入庫的 Unix 時間 |
+
+四個 Gauge 是為了讓「Worker 有沒有在消化」能被**直接**告警而存在的。Counter 停止增長是個
+歧義訊號；Gauge 則不論流量高低都持續回報狀態。Worker 內部用屬性 setter 統一更新
+`telemetry_worker_healthy`，確保它跟 `/health/worker` 回報的狀態不會分岔。
 
 此外 `app.UseHttpMetrics()` 會自動產生標準的 HTTP 指標（`http_request_duration_seconds`、`http_requests_received_total` 等）。
 
-**健康的系統應該滿足：** `rate(telemetry_consumed_total)` ≈ `rate(telemetry_written_total)`，且 `telemetry_failed_total` 保持為 0。
+### 8.2 Broker 指標（`rabbitmq_prometheus` plugin）
+
+官方 image 已預設啟用該 plugin。`rabbitmq.conf` 額外開啟
+`prometheus.return_per_object_metrics = true`，讓指標帶上 `vhost` / `queue` 標籤，
+才能分佇列做圖與告警：
+
+| 指標名稱 | 意義 |
+|----------|------|
+| `rabbitmq_queue_messages_ready{queue}` | **待處理訊息數 —— 積壓的定義** |
+| `rabbitmq_queue_messages_unacked{queue}` | 已投遞但未 ack（受 prefetch=500 上限影響） |
+| `rabbitmq_queue_consumers{queue}` | **佇列上的消費者數，0 = 沒人在消化** |
+| `rabbitmq_queue_messages_published_total{queue}` | 累計發布數（取 rate 得發布速率） |
+| `rabbitmq_channel_messages_redelivered_total{queue}` | 累計重送數（處理失敗被 requeue） |
+| `rabbitmq_alarms_*` | 記憶體 / 磁碟 / fd 水位警報（觸發後 broker 會擋住發布端） |
+
+### 8.3 儀表板與告警
+
+Grafana 的資料來源、3 張儀表板與 19 條告警規則全部由 `grafana/` 底下的檔案 provisioning，
+容器啟動即生效，不需要在 UI 內設定。
+
+**健康的系統應該滿足：**
+`rate(telemetry_consumed_total)` ≈ `rate(telemetry_written_total)` ≈ 發布速率，
+`rabbitmq_queue_messages_ready` 貼著 0，`rabbitmq_queue_consumers` ≥ 1，
+且 `telemetry_failed_total` 保持為 0。
+
+> 📖 儀表板導覽、告警規則與門檻依據見 **[監控與告警手冊 MONITORING.md](./MONITORING.md)**。
 
 ---
 
@@ -347,6 +392,7 @@ Worker 落庫時透過 `SensorReading.FromTelemetry(...)` 把每筆寬表快照�
 
 ## 12. 延伸閱讀
 
-- 🛠️ [操作手冊 OPERATIONS.md](./OPERATIONS.md) — 啟動、驗證、監控設定、壓測、故障排除
+- 🛠️ [操作手冊 OPERATIONS.md](./OPERATIONS.md) — 啟動、驗證、壓測、故障排除
+- 🚨 [監控與告警 MONITORING.md](./MONITORING.md) — 儀表板導覽、19 條告警規則、門檻調整、積壓演練
 - 👩‍💻 [開發者指南 DEVELOPMENT.md](./DEVELOPMENT.md) — 本機開發、加 API、加 Migration、除錯
 - 📄 [根目錄 README.md](../README.md) — 快速開始

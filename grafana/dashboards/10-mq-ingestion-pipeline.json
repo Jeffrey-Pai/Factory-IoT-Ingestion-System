@@ -1,0 +1,1791 @@
+{
+  "annotations": {
+    "list": [
+      {
+        "builtIn": 1,
+        "datasource": {
+          "type": "grafana",
+          "uid": "-- Grafana --"
+        },
+        "enable": true,
+        "hide": true,
+        "iconColor": "rgba(0, 211, 255, 1)",
+        "name": "Annotations & Alerts",
+        "type": "dashboard"
+      }
+    ]
+  },
+  "description": "遙測管線的主控台:佇列積壓、Worker 是否在消化、瓶頸落在 MQ / Worker / 資料庫哪一段。",
+  "editable": false,
+  "fiscalYearStartMonth": 0,
+  "graphTooltip": 1,
+  "links": [],
+  "panels": [
+    {
+      "collapsed": false,
+      "gridPos": {
+        "h": 1,
+        "w": 24,
+        "x": 0,
+        "y": 0
+      },
+      "id": 1,
+      "panels": [],
+      "title": "🚨 現況總覽 — 一眼判斷「有沒有在積、有沒有在消化」",
+      "type": "row"
+    },
+    {
+      "id": 2,
+      "type": "stat",
+      "title": "佇列積壓 (Ready)",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "factory-iot-prometheus"
+      },
+      "gridPos": {
+        "h": 5,
+        "w": 6,
+        "x": 0,
+        "y": 1
+      },
+      "pluginVersion": "10.4.2",
+      "fieldConfig": {
+        "defaults": {
+          "color": {
+            "mode": "thresholds"
+          },
+          "mappings": [],
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "#0ca30c",
+                "value": null
+              },
+              {
+                "color": "#fab219",
+                "value": 1000
+              },
+              {
+                "color": "#ec835a",
+                "value": 5000
+              },
+              {
+                "color": "#d03b3b",
+                "value": 10000
+              }
+            ]
+          },
+          "unit": "short",
+          "decimals": 0
+        },
+        "overrides": []
+      },
+      "options": {
+        "colorMode": "value",
+        "graphMode": "area",
+        "justifyMode": "auto",
+        "orientation": "auto",
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ],
+          "fields": "",
+          "values": false
+        },
+        "textMode": "auto",
+        "wideLayout": true,
+        "showPercentChange": false,
+        "percentChangeColorMode": "standard"
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "factory-iot-prometheus"
+          },
+          "editorMode": "code",
+          "expr": "sum(rabbitmq_queue_messages_ready{queue=\"$queue\"})",
+          "range": true,
+          "instant": false,
+          "refId": "A"
+        }
+      ],
+      "description": "等著被消化、還沒送出去的訊息數。這是「MQ 有沒有在累積」最直接的答案。健康時應該接近 0,持續往上就是消化端跟不上。門檻對應告警 fiot-backlog-warning / -critical。"
+    },
+    {
+      "id": 3,
+      "type": "stat",
+      "title": "處理中 (Unacked)",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "factory-iot-prometheus"
+      },
+      "gridPos": {
+        "h": 5,
+        "w": 6,
+        "x": 6,
+        "y": 1
+      },
+      "pluginVersion": "10.4.2",
+      "fieldConfig": {
+        "defaults": {
+          "color": {
+            "mode": "thresholds"
+          },
+          "mappings": [],
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "#0ca30c",
+                "value": null
+              },
+              {
+                "color": "#fab219",
+                "value": 500
+              }
+            ]
+          },
+          "unit": "short",
+          "decimals": 0
+        },
+        "overrides": []
+      },
+      "options": {
+        "colorMode": "value",
+        "graphMode": "area",
+        "justifyMode": "auto",
+        "orientation": "auto",
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ],
+          "fields": "",
+          "values": false
+        },
+        "textMode": "auto",
+        "wideLayout": true,
+        "showPercentChange": false,
+        "percentChangeColorMode": "standard"
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "factory-iot-prometheus"
+          },
+          "editorMode": "code",
+          "expr": "sum(rabbitmq_queue_messages_unacked{queue=\"$queue\"})",
+          "range": true,
+          "instant": false,
+          "refId": "A"
+        }
+      ],
+      "description": "已經送給 Worker、但還沒被 ack 的訊息。正常會在 0～prefetch(500)之間浮動。貼著 500 不動 = Worker 收了卻卡住沒處理完。"
+    },
+    {
+      "id": 4,
+      "type": "stat",
+      "title": "Worker 消費者數",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "factory-iot-prometheus"
+      },
+      "gridPos": {
+        "h": 5,
+        "w": 6,
+        "x": 12,
+        "y": 1
+      },
+      "pluginVersion": "10.4.2",
+      "fieldConfig": {
+        "defaults": {
+          "color": {
+            "mode": "thresholds"
+          },
+          "mappings": [
+            {
+              "type": "value",
+              "options": {
+                "0": {
+                  "text": "0 · 沒人在消化",
+                  "index": 0
+                }
+              }
+            }
+          ],
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "#d03b3b",
+                "value": null
+              },
+              {
+                "color": "#0ca30c",
+                "value": 1
+              }
+            ]
+          },
+          "unit": "short",
+          "decimals": 0
+        },
+        "overrides": []
+      },
+      "options": {
+        "colorMode": "value",
+        "graphMode": "none",
+        "justifyMode": "auto",
+        "orientation": "auto",
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ],
+          "fields": "",
+          "values": false
+        },
+        "textMode": "auto",
+        "wideLayout": true,
+        "showPercentChange": false,
+        "percentChangeColorMode": "standard"
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "factory-iot-prometheus"
+          },
+          "editorMode": "code",
+          "expr": "sum(rabbitmq_queue_consumers{queue=\"$queue\"})",
+          "range": true,
+          "instant": false,
+          "refId": "A"
+        }
+      ],
+      "description": "掛在這條佇列上的 consumer 數量。0 代表 Worker 根本沒接上 MQ —— 訊息只進不出,是積壓最常見的根因。"
+    },
+    {
+      "id": 5,
+      "type": "stat",
+      "title": "Worker 健康狀態",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "factory-iot-prometheus"
+      },
+      "gridPos": {
+        "h": 5,
+        "w": 6,
+        "x": 18,
+        "y": 1
+      },
+      "pluginVersion": "10.4.2",
+      "fieldConfig": {
+        "defaults": {
+          "color": {
+            "mode": "thresholds"
+          },
+          "mappings": [
+            {
+              "type": "value",
+              "options": {
+                "0": {
+                  "text": "異常",
+                  "color": "#d03b3b",
+                  "index": 0
+                },
+                "1": {
+                  "text": "正常",
+                  "color": "#0ca30c",
+                  "index": 1
+                }
+              }
+            }
+          ],
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "#d03b3b",
+                "value": null
+              },
+              {
+                "color": "#0ca30c",
+                "value": 1
+              }
+            ]
+          },
+          "unit": "short"
+        },
+        "overrides": []
+      },
+      "options": {
+        "colorMode": "background",
+        "graphMode": "none",
+        "justifyMode": "auto",
+        "orientation": "auto",
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ],
+          "fields": "",
+          "values": false
+        },
+        "textMode": "auto",
+        "wideLayout": true,
+        "showPercentChange": false,
+        "percentChangeColorMode": "standard"
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "factory-iot-prometheus"
+          },
+          "editorMode": "code",
+          "expr": "min(telemetry_worker_healthy)",
+          "range": true,
+          "instant": false,
+          "refId": "A"
+        }
+      ],
+      "description": "Worker 自報狀態,等同 /health/worker 的 isHealthy:必須同時「連上 RabbitMQ」且「批次處理迴圈在跑」才算正常。"
+    },
+    {
+      "id": 6,
+      "type": "stat",
+      "title": "消化速率",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "factory-iot-prometheus"
+      },
+      "gridPos": {
+        "h": 5,
+        "w": 6,
+        "x": 0,
+        "y": 6
+      },
+      "pluginVersion": "10.4.2",
+      "fieldConfig": {
+        "defaults": {
+          "color": {
+            "mode": "thresholds"
+          },
+          "mappings": [],
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "#d03b3b",
+                "value": null
+              },
+              {
+                "color": "#0ca30c",
+                "value": 0.1
+              }
+            ]
+          },
+          "unit": "reqps",
+          "decimals": 1
+        },
+        "overrides": []
+      },
+      "options": {
+        "colorMode": "value",
+        "graphMode": "area",
+        "justifyMode": "auto",
+        "orientation": "auto",
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ],
+          "fields": "",
+          "values": false
+        },
+        "textMode": "auto",
+        "wideLayout": true,
+        "showPercentChange": false,
+        "percentChangeColorMode": "standard"
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "factory-iot-prometheus"
+          },
+          "editorMode": "code",
+          "expr": "sum(rate(telemetry_consumed_total[5m]))",
+          "range": true,
+          "instant": false,
+          "refId": "A"
+        }
+      ],
+      "description": "Worker 每秒從 MQ 取出的訊息數(5 分鐘平均)。50 台機台各每秒 1 筆的情境下,健康值約 50/s;掉到 0 就是完全沒在消化。"
+    },
+    {
+      "id": 7,
+      "type": "stat",
+      "title": "入庫速率",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "factory-iot-prometheus"
+      },
+      "gridPos": {
+        "h": 5,
+        "w": 6,
+        "x": 6,
+        "y": 6
+      },
+      "pluginVersion": "10.4.2",
+      "fieldConfig": {
+        "defaults": {
+          "color": {
+            "mode": "thresholds"
+          },
+          "mappings": [],
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "#d03b3b",
+                "value": null
+              },
+              {
+                "color": "#0ca30c",
+                "value": 0.1
+              }
+            ]
+          },
+          "unit": "reqps",
+          "decimals": 1
+        },
+        "overrides": []
+      },
+      "options": {
+        "colorMode": "value",
+        "graphMode": "area",
+        "justifyMode": "auto",
+        "orientation": "auto",
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ],
+          "fields": "",
+          "values": false
+        },
+        "textMode": "auto",
+        "wideLayout": true,
+        "showPercentChange": false,
+        "percentChangeColorMode": "standard"
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "factory-iot-prometheus"
+          },
+          "editorMode": "code",
+          "expr": "sum(rate(telemetry_written_total[5m]))",
+          "range": true,
+          "instant": false,
+          "refId": "A"
+        }
+      ],
+      "description": "每秒真正寫進 SQL Server 的筆數。應該貼著消化速率;長期低於它代表資料塞在 Worker 裡沒落地。"
+    },
+    {
+      "id": 8,
+      "type": "stat",
+      "title": "淨積壓變化",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "factory-iot-prometheus"
+      },
+      "gridPos": {
+        "h": 5,
+        "w": 6,
+        "x": 12,
+        "y": 6
+      },
+      "pluginVersion": "10.4.2",
+      "fieldConfig": {
+        "defaults": {
+          "color": {
+            "mode": "thresholds"
+          },
+          "mappings": [],
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "#0ca30c",
+                "value": null
+              },
+              {
+                "color": "#fab219",
+                "value": 0.5
+              },
+              {
+                "color": "#d03b3b",
+                "value": 5
+              }
+            ]
+          },
+          "unit": "reqps",
+          "decimals": 1
+        },
+        "overrides": []
+      },
+      "options": {
+        "colorMode": "value",
+        "graphMode": "area",
+        "justifyMode": "auto",
+        "orientation": "auto",
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ],
+          "fields": "",
+          "values": false
+        },
+        "textMode": "auto",
+        "wideLayout": true,
+        "showPercentChange": false,
+        "percentChangeColorMode": "standard"
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "factory-iot-prometheus"
+          },
+          "editorMode": "code",
+          "expr": "(sum(rate(rabbitmq_queue_messages_published_total{queue=\"$queue\"}[5m])) or vector(0)) - (sum(rate(telemetry_consumed_total[5m])) or vector(0))",
+          "range": true,
+          "instant": false,
+          "refId": "A"
+        }
+      ],
+      "description": "發布速率 − 消化速率。> 0 就是每秒補不回來的量,佇列會單調成長;≤ 0 代表正在追回積壓。"
+    },
+    {
+      "id": 9,
+      "type": "stat",
+      "title": "預估清空時間",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "factory-iot-prometheus"
+      },
+      "gridPos": {
+        "h": 5,
+        "w": 6,
+        "x": 18,
+        "y": 6
+      },
+      "pluginVersion": "10.4.2",
+      "fieldConfig": {
+        "defaults": {
+          "color": {
+            "mode": "thresholds"
+          },
+          "mappings": [
+            {
+              "type": "range",
+              "options": {
+                "from": 86400,
+                "to": 1000000000000.0,
+                "result": {
+                  "text": "⚠ 追不上,持續積壓",
+                  "color": "#d03b3b",
+                  "index": 0
+                }
+              }
+            }
+          ],
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "#0ca30c",
+                "value": null
+              },
+              {
+                "color": "#fab219",
+                "value": 300
+              },
+              {
+                "color": "#d03b3b",
+                "value": 1800
+              }
+            ]
+          },
+          "unit": "s",
+          "decimals": 0
+        },
+        "overrides": []
+      },
+      "options": {
+        "colorMode": "value",
+        "graphMode": "none",
+        "justifyMode": "auto",
+        "orientation": "auto",
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ],
+          "fields": "",
+          "values": false
+        },
+        "textMode": "auto",
+        "wideLayout": true,
+        "showPercentChange": false,
+        "percentChangeColorMode": "standard"
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "factory-iot-prometheus"
+          },
+          "editorMode": "code",
+          "expr": "sum(rabbitmq_queue_messages_ready{queue=\"$queue\"}) / clamp_min((sum(rate(telemetry_consumed_total[5m])) or vector(0)) - (sum(rate(rabbitmq_queue_messages_published_total{queue=\"$queue\"}[5m])) or vector(0)), 0.0001)",
+          "range": true,
+          "instant": false,
+          "refId": "A"
+        }
+      ],
+      "description": "用目前的淨消化速度,把現有積壓清光要多久。消化速率低於發布速率時永遠清不完,會直接顯示「追不上」。"
+    },
+    {
+      "collapsed": false,
+      "gridPos": {
+        "h": 1,
+        "w": 24,
+        "x": 0,
+        "y": 11
+      },
+      "id": 10,
+      "panels": [],
+      "title": "📈 積壓趨勢 — 什麼時候開始歪掉的",
+      "type": "row"
+    },
+    {
+      "id": 11,
+      "type": "timeseries",
+      "title": "佇列深度：待處理 vs 處理中",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "factory-iot-prometheus"
+      },
+      "gridPos": {
+        "h": 9,
+        "w": 12,
+        "x": 0,
+        "y": 12
+      },
+      "pluginVersion": "10.4.2",
+      "fieldConfig": {
+        "defaults": {
+          "color": {
+            "mode": "palette-classic"
+          },
+          "custom": {
+            "axisBorderShow": false,
+            "axisCenteredZero": false,
+            "axisColorMode": "text",
+            "axisLabel": "",
+            "axisPlacement": "auto",
+            "barAlignment": 0,
+            "drawStyle": "line",
+            "fillOpacity": 35,
+            "gradientMode": "none",
+            "hideFrom": {
+              "legend": false,
+              "tooltip": false,
+              "viz": false
+            },
+            "insertNulls": false,
+            "lineInterpolation": "linear",
+            "lineWidth": 2,
+            "pointSize": 8,
+            "scaleDistribution": {
+              "type": "linear"
+            },
+            "showPoints": "never",
+            "spanNulls": false,
+            "stacking": {
+              "group": "A",
+              "mode": "normal"
+            },
+            "thresholdsStyle": {
+              "mode": "dashed"
+            }
+          },
+          "mappings": [],
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "transparent",
+                "value": null
+              },
+              {
+                "color": "#fab219",
+                "value": 1000
+              },
+              {
+                "color": "#d03b3b",
+                "value": 10000
+              }
+            ]
+          },
+          "unit": "short",
+          "min": 0,
+          "decimals": 0
+        },
+        "overrides": [
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "待處理 (Ready)"
+            },
+            "properties": [
+              {
+                "id": "color",
+                "value": {
+                  "fixedColor": "#3987e5",
+                  "mode": "fixed"
+                }
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "處理中 (Unacked)"
+            },
+            "properties": [
+              {
+                "id": "color",
+                "value": {
+                  "fixedColor": "#d95926",
+                  "mode": "fixed"
+                }
+              }
+            ]
+          }
+        ]
+      },
+      "options": {
+        "legend": {
+          "calcs": [
+            "mean",
+            "max",
+            "lastNotNull"
+          ],
+          "displayMode": "table",
+          "placement": "bottom",
+          "showLegend": true
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "factory-iot-prometheus"
+          },
+          "editorMode": "code",
+          "expr": "sum(rabbitmq_queue_messages_ready{queue=\"$queue\"})",
+          "range": true,
+          "instant": false,
+          "refId": "A",
+          "legendFormat": "待處理 (Ready)"
+        },
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "factory-iot-prometheus"
+          },
+          "editorMode": "code",
+          "expr": "sum(rabbitmq_queue_messages_unacked{queue=\"$queue\"})",
+          "range": true,
+          "instant": false,
+          "refId": "B",
+          "legendFormat": "處理中 (Unacked)"
+        }
+      ],
+      "description": "堆疊面積 = 佇列裡的訊息總量。虛線是告警門檻(1000 警戒 / 10000 嚴重)。Ready 一路往上而 Unacked 貼著 0 = 沒人在拿訊息;Unacked 貼在 prefetch 上限而 Ready 往上 = 有人在拿但處理不完。"
+    },
+    {
+      "id": 12,
+      "type": "timeseries",
+      "title": "發布 vs 消化 vs 入庫（每秒）",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "factory-iot-prometheus"
+      },
+      "gridPos": {
+        "h": 9,
+        "w": 12,
+        "x": 12,
+        "y": 12
+      },
+      "pluginVersion": "10.4.2",
+      "fieldConfig": {
+        "defaults": {
+          "color": {
+            "mode": "palette-classic"
+          },
+          "custom": {
+            "axisBorderShow": false,
+            "axisCenteredZero": false,
+            "axisColorMode": "text",
+            "axisLabel": "",
+            "axisPlacement": "auto",
+            "barAlignment": 0,
+            "drawStyle": "line",
+            "fillOpacity": 10,
+            "gradientMode": "none",
+            "hideFrom": {
+              "legend": false,
+              "tooltip": false,
+              "viz": false
+            },
+            "insertNulls": false,
+            "lineInterpolation": "linear",
+            "lineWidth": 2,
+            "pointSize": 8,
+            "scaleDistribution": {
+              "type": "linear"
+            },
+            "showPoints": "never",
+            "spanNulls": false,
+            "stacking": {
+              "group": "A",
+              "mode": "none"
+            },
+            "thresholdsStyle": {
+              "mode": "off"
+            }
+          },
+          "mappings": [],
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "text",
+                "value": null
+              }
+            ]
+          },
+          "unit": "reqps",
+          "min": 0,
+          "decimals": 1
+        },
+        "overrides": [
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "① 發布進 MQ"
+            },
+            "properties": [
+              {
+                "id": "color",
+                "value": {
+                  "fixedColor": "#199e70",
+                  "mode": "fixed"
+                }
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "② Worker 消化"
+            },
+            "properties": [
+              {
+                "id": "color",
+                "value": {
+                  "fixedColor": "#c98500",
+                  "mode": "fixed"
+                }
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "③ 寫進資料庫"
+            },
+            "properties": [
+              {
+                "id": "color",
+                "value": {
+                  "fixedColor": "#d55181",
+                  "mode": "fixed"
+                }
+              }
+            ]
+          }
+        ]
+      },
+      "options": {
+        "legend": {
+          "calcs": [
+            "mean",
+            "max",
+            "lastNotNull"
+          ],
+          "displayMode": "table",
+          "placement": "bottom",
+          "showLegend": true
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "factory-iot-prometheus"
+          },
+          "editorMode": "code",
+          "expr": "sum(rate(rabbitmq_queue_messages_published_total{queue=\"$queue\"}[$__rate_interval]))",
+          "range": true,
+          "instant": false,
+          "refId": "A",
+          "legendFormat": "① 發布進 MQ"
+        },
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "factory-iot-prometheus"
+          },
+          "editorMode": "code",
+          "expr": "sum(rate(telemetry_consumed_total[$__rate_interval]))",
+          "range": true,
+          "instant": false,
+          "refId": "B",
+          "legendFormat": "② Worker 消化"
+        },
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "factory-iot-prometheus"
+          },
+          "editorMode": "code",
+          "expr": "sum(rate(telemetry_written_total[$__rate_interval]))",
+          "range": true,
+          "instant": false,
+          "refId": "C",
+          "legendFormat": "③ 寫進資料庫"
+        }
+      ],
+      "description": "整條管線的三個關卡。健康時三條線幾乎重疊。① 高於 ② → 積在 MQ;② 高於 ③ → 積在 Worker 記憶體。線分岔的那一段就是瓶頸所在。"
+    },
+    {
+      "id": 13,
+      "type": "timeseries",
+      "title": "積壓成長率（每秒增減）",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "factory-iot-prometheus"
+      },
+      "gridPos": {
+        "h": 7,
+        "w": 12,
+        "x": 0,
+        "y": 21
+      },
+      "pluginVersion": "10.4.2",
+      "fieldConfig": {
+        "defaults": {
+          "color": {
+            "mode": "palette-classic"
+          },
+          "custom": {
+            "axisBorderShow": false,
+            "axisCenteredZero": false,
+            "axisColorMode": "text",
+            "axisLabel": "",
+            "axisPlacement": "auto",
+            "barAlignment": 0,
+            "drawStyle": "line",
+            "fillOpacity": 20,
+            "gradientMode": "none",
+            "hideFrom": {
+              "legend": false,
+              "tooltip": false,
+              "viz": false
+            },
+            "insertNulls": false,
+            "lineInterpolation": "linear",
+            "lineWidth": 2,
+            "pointSize": 8,
+            "scaleDistribution": {
+              "type": "linear"
+            },
+            "showPoints": "never",
+            "spanNulls": false,
+            "stacking": {
+              "group": "A",
+              "mode": "none"
+            },
+            "thresholdsStyle": {
+              "mode": "dashed"
+            }
+          },
+          "mappings": [],
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "transparent",
+                "value": null
+              },
+              {
+                "color": "#fab219",
+                "value": 1
+              }
+            ]
+          },
+          "unit": "reqps",
+          "decimals": 2
+        },
+        "overrides": [
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "積壓成長率"
+            },
+            "properties": [
+              {
+                "id": "color",
+                "value": {
+                  "fixedColor": "#3987e5",
+                  "mode": "fixed"
+                }
+              }
+            ]
+          }
+        ]
+      },
+      "options": {
+        "legend": {
+          "calcs": [
+            "mean",
+            "max",
+            "lastNotNull"
+          ],
+          "displayMode": "table",
+          "placement": "bottom",
+          "showLegend": true
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "factory-iot-prometheus"
+          },
+          "editorMode": "code",
+          "expr": "deriv(sum(rabbitmq_queue_messages_ready{queue=\"$queue\"})[15m:1m])",
+          "range": true,
+          "instant": false,
+          "refId": "A",
+          "legendFormat": "積壓成長率"
+        }
+      ],
+      "description": "佇列深度的 15 分鐘斜率。持續在 0 以上就代表方向不對 —— 即使絕對量還沒超標,也已經在往積壓的路上。對應告警 fiot-backlog-growing。"
+    },
+    {
+      "id": 14,
+      "type": "alertlist",
+      "title": "🔔 目前告警",
+      "gridPos": {
+        "h": 7,
+        "w": 12,
+        "x": 12,
+        "y": 21
+      },
+      "pluginVersion": "10.4.2",
+      "description": "這套系統所有 firing / pending 的告警(標籤 service=factory-iot)。規則定義在 grafana/provisioning/alerting/,點進去可以看到處理步驟。",
+      "options": {
+        "alertInstanceLabelFilter": "{service=\"factory-iot\"}",
+        "alertName": "",
+        "dashboardAlerts": false,
+        "dashboardTitle": "",
+        "groupBy": [],
+        "groupMode": "default",
+        "maxItems": 20,
+        "sortOrder": 3,
+        "stateFilter": {
+          "error": true,
+          "firing": true,
+          "noData": false,
+          "normal": false,
+          "pending": true
+        },
+        "viewMode": "list"
+      }
+    },
+    {
+      "collapsed": false,
+      "gridPos": {
+        "h": 1,
+        "w": 24,
+        "x": 0,
+        "y": 28
+      },
+      "id": 15,
+      "panels": [],
+      "title": "⚙️ Worker 消化端 — 積壓的原因通常在這裡",
+      "type": "row"
+    },
+    {
+      "id": 16,
+      "type": "timeseries",
+      "title": "Worker 內部緩衝深度",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "factory-iot-prometheus"
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 8,
+        "x": 0,
+        "y": 29
+      },
+      "pluginVersion": "10.4.2",
+      "fieldConfig": {
+        "defaults": {
+          "color": {
+            "mode": "palette-classic"
+          },
+          "custom": {
+            "axisBorderShow": false,
+            "axisCenteredZero": false,
+            "axisColorMode": "text",
+            "axisLabel": "",
+            "axisPlacement": "auto",
+            "barAlignment": 0,
+            "drawStyle": "line",
+            "fillOpacity": 20,
+            "gradientMode": "none",
+            "hideFrom": {
+              "legend": false,
+              "tooltip": false,
+              "viz": false
+            },
+            "insertNulls": false,
+            "lineInterpolation": "linear",
+            "lineWidth": 2,
+            "pointSize": 8,
+            "scaleDistribution": {
+              "type": "linear"
+            },
+            "showPoints": "never",
+            "spanNulls": false,
+            "stacking": {
+              "group": "A",
+              "mode": "none"
+            },
+            "thresholdsStyle": {
+              "mode": "dashed"
+            }
+          },
+          "mappings": [],
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "transparent",
+                "value": null
+              },
+              {
+                "color": "#fab219",
+                "value": 5000
+              }
+            ]
+          },
+          "unit": "short",
+          "min": 0,
+          "decimals": 0
+        },
+        "overrides": [
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "尚未入庫的緩衝筆數"
+            },
+            "properties": [
+              {
+                "id": "color",
+                "value": {
+                  "fixedColor": "#9085e9",
+                  "mode": "fixed"
+                }
+              }
+            ]
+          }
+        ]
+      },
+      "options": {
+        "legend": {
+          "calcs": [
+            "mean",
+            "max",
+            "lastNotNull"
+          ],
+          "displayMode": "table",
+          "placement": "bottom",
+          "showLegend": true
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "factory-iot-prometheus"
+          },
+          "editorMode": "code",
+          "expr": "max(telemetry_worker_buffer_depth)",
+          "range": true,
+          "instant": false,
+          "refId": "A",
+          "legendFormat": "尚未入庫的緩衝筆數"
+        }
+      ],
+      "description": "已經從 MQ 取出、但還沒寫進資料庫的筆數。這段緩衝是 unbounded 的:數字很大代表 MQ 看起來乾淨,風險其實轉移到了記憶體 —— 這時重啟容器會直接丟資料。"
+    },
+    {
+      "id": 17,
+      "type": "timeseries",
+      "title": "批次寫入延遲（分位數）",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "factory-iot-prometheus"
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 8,
+        "x": 8,
+        "y": 29
+      },
+      "pluginVersion": "10.4.2",
+      "fieldConfig": {
+        "defaults": {
+          "color": {
+            "mode": "palette-classic"
+          },
+          "custom": {
+            "axisBorderShow": false,
+            "axisCenteredZero": false,
+            "axisColorMode": "text",
+            "axisLabel": "",
+            "axisPlacement": "auto",
+            "barAlignment": 0,
+            "drawStyle": "line",
+            "fillOpacity": 10,
+            "gradientMode": "none",
+            "hideFrom": {
+              "legend": false,
+              "tooltip": false,
+              "viz": false
+            },
+            "insertNulls": false,
+            "lineInterpolation": "linear",
+            "lineWidth": 2,
+            "pointSize": 8,
+            "scaleDistribution": {
+              "type": "linear"
+            },
+            "showPoints": "never",
+            "spanNulls": false,
+            "stacking": {
+              "group": "A",
+              "mode": "none"
+            },
+            "thresholdsStyle": {
+              "mode": "dashed"
+            }
+          },
+          "mappings": [],
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "transparent",
+                "value": null
+              },
+              {
+                "color": "#fab219",
+                "value": 2
+              }
+            ]
+          },
+          "unit": "s",
+          "min": 0,
+          "decimals": 3
+        },
+        "overrides": [
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "P50"
+            },
+            "properties": [
+              {
+                "id": "color",
+                "value": {
+                  "fixedColor": "#86b6ef",
+                  "mode": "fixed"
+                }
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "P95"
+            },
+            "properties": [
+              {
+                "id": "color",
+                "value": {
+                  "fixedColor": "#3987e5",
+                  "mode": "fixed"
+                }
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "P99"
+            },
+            "properties": [
+              {
+                "id": "color",
+                "value": {
+                  "fixedColor": "#1c5cab",
+                  "mode": "fixed"
+                }
+              }
+            ]
+          }
+        ]
+      },
+      "options": {
+        "legend": {
+          "calcs": [
+            "mean",
+            "max",
+            "lastNotNull"
+          ],
+          "displayMode": "table",
+          "placement": "bottom",
+          "showLegend": true
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "factory-iot-prometheus"
+          },
+          "editorMode": "code",
+          "expr": "histogram_quantile(0.50, sum by (le) (rate(telemetry_batch_processing_seconds_bucket[$__rate_interval])))",
+          "range": true,
+          "instant": false,
+          "refId": "A",
+          "legendFormat": "P50"
+        },
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "factory-iot-prometheus"
+          },
+          "editorMode": "code",
+          "expr": "histogram_quantile(0.95, sum by (le) (rate(telemetry_batch_processing_seconds_bucket[$__rate_interval])))",
+          "range": true,
+          "instant": false,
+          "refId": "B",
+          "legendFormat": "P95"
+        },
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "factory-iot-prometheus"
+          },
+          "editorMode": "code",
+          "expr": "histogram_quantile(0.99, sum by (le) (rate(telemetry_batch_processing_seconds_bucket[$__rate_interval])))",
+          "range": true,
+          "instant": false,
+          "refId": "C",
+          "legendFormat": "P99"
+        }
+      ],
+      "description": "一批 100 筆寫進 SQL Server 花的時間。批次觸發間隔是 2 秒,P95 一旦逼近虛線就代表上一批還沒寫完下一批就到了 —— 資料庫已是瓶頸。"
+    },
+    {
+      "id": 18,
+      "type": "timeseries",
+      "title": "寫入失敗與訊息重送",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "factory-iot-prometheus"
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 8,
+        "x": 16,
+        "y": 29
+      },
+      "pluginVersion": "10.4.2",
+      "fieldConfig": {
+        "defaults": {
+          "color": {
+            "mode": "palette-classic"
+          },
+          "custom": {
+            "axisBorderShow": false,
+            "axisCenteredZero": false,
+            "axisColorMode": "text",
+            "axisLabel": "",
+            "axisPlacement": "auto",
+            "barAlignment": 0,
+            "drawStyle": "line",
+            "fillOpacity": 10,
+            "gradientMode": "none",
+            "hideFrom": {
+              "legend": false,
+              "tooltip": false,
+              "viz": false
+            },
+            "insertNulls": false,
+            "lineInterpolation": "linear",
+            "lineWidth": 2,
+            "pointSize": 8,
+            "scaleDistribution": {
+              "type": "linear"
+            },
+            "showPoints": "never",
+            "spanNulls": false,
+            "stacking": {
+              "group": "A",
+              "mode": "none"
+            },
+            "thresholdsStyle": {
+              "mode": "off"
+            }
+          },
+          "mappings": [],
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "text",
+                "value": null
+              }
+            ]
+          },
+          "unit": "reqps",
+          "min": 0,
+          "decimals": 2
+        },
+        "overrides": [
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "入庫失敗（資料遺失）"
+            },
+            "properties": [
+              {
+                "id": "color",
+                "value": {
+                  "fixedColor": "#d03b3b",
+                  "mode": "fixed"
+                }
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "訊息重送"
+            },
+            "properties": [
+              {
+                "id": "color",
+                "value": {
+                  "fixedColor": "#fab219",
+                  "mode": "fixed"
+                }
+              }
+            ]
+          }
+        ]
+      },
+      "options": {
+        "legend": {
+          "calcs": [
+            "mean",
+            "max",
+            "lastNotNull"
+          ],
+          "displayMode": "table",
+          "placement": "bottom",
+          "showLegend": true
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "factory-iot-prometheus"
+          },
+          "editorMode": "code",
+          "expr": "sum(rate(telemetry_failed_total[$__rate_interval]))",
+          "range": true,
+          "instant": false,
+          "refId": "A",
+          "legendFormat": "入庫失敗（資料遺失）"
+        },
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "factory-iot-prometheus"
+          },
+          "editorMode": "code",
+          "expr": "sum(rate(rabbitmq_channel_messages_redelivered_total{queue=\"$queue\"}[$__rate_interval]))",
+          "range": true,
+          "instant": false,
+          "refId": "B",
+          "legendFormat": "訊息重送"
+        }
+      ],
+      "description": "兩條線都應該恆為 0。「入庫失敗」代表重試 3 次後放棄,那批資料已永久遺失;「訊息重送」代表處理失敗被 requeue,會反覆佔用消化量能讓佇列清不掉。"
+    },
+    {
+      "id": 19,
+      "type": "timeseries",
+      "title": "停滯時間：距離上次收到訊息 / 上次入庫",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "factory-iot-prometheus"
+      },
+      "gridPos": {
+        "h": 7,
+        "w": 24,
+        "x": 0,
+        "y": 37
+      },
+      "pluginVersion": "10.4.2",
+      "fieldConfig": {
+        "defaults": {
+          "color": {
+            "mode": "palette-classic"
+          },
+          "custom": {
+            "axisBorderShow": false,
+            "axisCenteredZero": false,
+            "axisColorMode": "text",
+            "axisLabel": "",
+            "axisPlacement": "auto",
+            "barAlignment": 0,
+            "drawStyle": "line",
+            "fillOpacity": 10,
+            "gradientMode": "none",
+            "hideFrom": {
+              "legend": false,
+              "tooltip": false,
+              "viz": false
+            },
+            "insertNulls": false,
+            "lineInterpolation": "linear",
+            "lineWidth": 2,
+            "pointSize": 8,
+            "scaleDistribution": {
+              "type": "linear"
+            },
+            "showPoints": "never",
+            "spanNulls": false,
+            "stacking": {
+              "group": "A",
+              "mode": "none"
+            },
+            "thresholdsStyle": {
+              "mode": "dashed"
+            }
+          },
+          "mappings": [],
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "transparent",
+                "value": null
+              },
+              {
+                "color": "#fab219",
+                "value": 300
+              }
+            ]
+          },
+          "unit": "s",
+          "min": 0,
+          "decimals": 0
+        },
+        "overrides": [
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "距上次收到訊息"
+            },
+            "properties": [
+              {
+                "id": "color",
+                "value": {
+                  "fixedColor": "#3987e5",
+                  "mode": "fixed"
+                }
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "距上次寫入資料庫"
+            },
+            "properties": [
+              {
+                "id": "color",
+                "value": {
+                  "fixedColor": "#d95926",
+                  "mode": "fixed"
+                }
+              }
+            ]
+          }
+        ]
+      },
+      "options": {
+        "legend": {
+          "calcs": [
+            "mean",
+            "max",
+            "lastNotNull"
+          ],
+          "displayMode": "table",
+          "placement": "bottom",
+          "showLegend": true
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "factory-iot-prometheus"
+          },
+          "editorMode": "code",
+          "expr": "time() - max(telemetry_worker_last_message_timestamp_seconds > 0)",
+          "range": true,
+          "instant": false,
+          "refId": "A",
+          "legendFormat": "距上次收到訊息"
+        },
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "factory-iot-prometheus"
+          },
+          "editorMode": "code",
+          "expr": "time() - max(telemetry_worker_last_flush_timestamp_seconds > 0)",
+          "range": true,
+          "instant": false,
+          "refId": "B",
+          "legendFormat": "距上次寫入資料庫"
+        }
+      ],
+      "description": "健康時兩條線都貼著地板(秒級)並持續鋸齒。任何一條開始單調爬升,就是那一段停了。同時搭配上方的〈佇列積壓〉判讀:積壓 0 + 收不到訊息 = 上游沒在發,不是故障。"
+    }
+  ],
+  "refresh": "10s",
+  "schemaVersion": 39,
+  "tags": [
+    "factory-iot",
+    "rabbitmq",
+    "worker",
+    "告警"
+  ],
+  "templating": {
+    "list": [
+      {
+        "current": {
+          "selected": false,
+          "text": "telemetry-queue",
+          "value": "telemetry-queue"
+        },
+        "datasource": {
+          "type": "prometheus",
+          "uid": "factory-iot-prometheus"
+        },
+        "definition": "label_values(rabbitmq_queue_messages_ready, queue)",
+        "hide": 0,
+        "includeAll": false,
+        "label": "佇列",
+        "multi": false,
+        "name": "queue",
+        "options": [],
+        "query": {
+          "qryType": 1,
+          "query": "label_values(rabbitmq_queue_messages_ready, queue)",
+          "refId": "PrometheusVariableQueryEditor-VariableQuery"
+        },
+        "refresh": 1,
+        "regex": "",
+        "skipUrlSync": false,
+        "sort": 1,
+        "type": "query"
+      }
+    ]
+  },
+  "time": {
+    "from": "now-1h",
+    "to": "now"
+  },
+  "timepicker": {},
+  "timezone": "browser",
+  "title": "① MQ 積壓與 Worker 消化",
+  "uid": "factory-iot-mq-pipeline",
+  "version": 1,
+  "weekStart": ""
+}

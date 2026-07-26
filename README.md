@@ -6,7 +6,8 @@
 | 文件 | 內容 | 適合誰 |
 |------|------|--------|
 | 📐 [系統架構 ARCHITECTURE.md](./docs/ARCHITECTURE.md) | 架構圖、資料流、分層設計、技術決策 | 想了解「系統在幹嘛」 |
-| 🛠️ [操作手冊 OPERATIONS.md](./docs/OPERATIONS.md) | 啟動、驗證、監控設定、壓測、故障排除 | 要把系統跑起來、維運 |
+| 🛠️ [操作手冊 OPERATIONS.md](./docs/OPERATIONS.md) | 啟動、驗證、壓測、故障排除 | 要把系統跑起來、維運 |
+| 🚨 [監控與告警 MONITORING.md](./docs/MONITORING.md) | 儀表板導覽、19 條告警規則、門檻怎麼調、積壓演練 | 要知道「出事會不會有人通知我」 |
 | 👩‍💻 [開發者指南 DEVELOPMENT.md](./docs/DEVELOPMENT.md) | 本機開發、加 API、加 Migration、除錯 | 要改程式碼 |
 | ✅ [驗證指南 VERIFICATION_GUIDE.md](./VERIFICATION_GUIDE.md) | RabbitMQ→MSSQL 資料流驗證與診斷 | 排查資料未入庫問題 |
 | 🖥️ [前端儀表板 frontend/README.md](./frontend/README.md) | React 即時監控儀表板:安裝、開發、Docker | 想看資料視覺化畫面 |
@@ -20,8 +21,9 @@ flowchart LR
     W --> DB[("🗄️ SQL Server")]
     API["🌐 REST API"] --> DB
     DASH["🖥️ 前端儀表板<br/>React + Vite"] --> API
-    PROM["📈 Prometheus"] --> API
-    GRAF["📊 Grafana"] --> PROM
+    MQ -.積壓、消費者數.-> PROM["📈 Prometheus"]
+    W -.消化、入庫、失敗.-> PROM
+    PROM --> GRAF["📊 Grafana<br/>儀表板 + 告警"]
 ```
 
 > 詳細架構、資料流時序圖與分層說明請見 [ARCHITECTURE.md](./docs/ARCHITECTURE.md)。
@@ -49,12 +51,13 @@ docker-compose ps
 ### 2. 驗證服務運行
 
 - **前端儀表板 (Dashboard)**: http://localhost:8081 - 即時監控畫面(主要使用者介面)
+- **Grafana 監控與告警**: http://localhost:3000 (帳號/密碼: `admin`/`admin`) - 儀表板與告警已預先設定好
 - **RabbitMQ Management UI**: http://localhost:15672 (帳號/密碼: `guest`/`guest`)
+- **RabbitMQ Metrics**: http://localhost:15692/metrics (Prometheus 格式，含佇列積壓)
 - **SQL Server**: localhost,1433 (帳號/密碼: `sa`/`IoT_Secret123!`) - 可使用 SSMS 管理
 - **Backend API Health**: http://localhost:8080/health
 - **Backend API Swagger**: http://localhost:8080/swagger (開發環境)
 - **Prometheus**: http://localhost:9090
-- **Grafana**: http://localhost:3000 (帳號/密碼: `admin`/`admin`)
 
 ### 3. 執行設備模擬器
 
@@ -66,27 +69,35 @@ docker-compose ps
 docker-compose logs -f simulator
 ```
 
-### 4. 設定 Grafana 監控
+### 4. 監控與告警（開箱即用，不用手動設定）
 
-#### 4.1 新增 Prometheus Data Source
+資料來源、儀表板、告警規則全部是從 `grafana/` 底下**自動 provisioning** 進去的。
+`docker compose up -d` 之後打開 http://localhost:3000 登入，**直接就是**
+〈① MQ 積壓與 Worker 消化〉—— 不需要加 data source、不需要自己拉圖表、不需要在 UI 裡建告警。
 
-1. 開啟 Grafana: http://localhost:3000
-2. 登入（帳號: `admin`, 密碼: `admin`）
-3. 點選左側選單 **Connections** > **Data sources**
-4. 點選 **Add data source**
-5. 選擇 **Prometheus**
-6. 設定以下參數：
-   - **Name**: `Prometheus`
-   - **URL**: `http://prometheus:9090`
-7. 點選 **Save & Test**，確認連線成功
+**三張儀表板**（Grafana 的 `Factory IoT` 資料夾）：
 
-#### 4.2 建立儀表板
+| 儀表板 | 看什麼 |
+|--------|--------|
+| ① MQ 積壓與 Worker 消化 | 佇列積壓、消費者數、發布 vs 消化 vs 入庫、瓶頸在哪一段 |
+| ② RabbitMQ Broker 健康 | 連線 / 資源水位警報 / 各佇列明細 |
+| ③ API 與資料庫寫入 | REST API 延遲與錯誤率、批次寫入效能 |
 
-可以匯入現有的 .NET 應用程式儀表板模板，或建立自訂儀表板監控以下指標：
+**19 條告警規則**，其中直接對應「MQ 一直累積、Worker 沒在消化」的有：
 
-- **HTTP 請求速率**: `rate(http_requests_received_total[1m])`
-- **HTTP 請求延遲**: `http_request_duration_seconds`
-- **錯誤率**: `rate(http_requests_received_total{code=~"5.."}[1m])`
+- 🔴 **佇列沒有任何消費者** — `rabbitmq_queue_consumers = 0` 持續 2 分鐘
+- 🔴 **有積壓但完全沒有消化** — 佇列有 200 筆以上待處理，但消化速率是 0
+- 🔴 **Worker 不健康** — 未連上 MQ 或批次處理停擺
+- 🟠 **MQ 積壓警戒 / 嚴重** — 待處理超過 1000 / 10000 筆
+- 🟠 **積壓持續成長** — 還沒超標，但斜率已經連續 15 分鐘往上
+
+告警會直接顯示在第一張儀表板的〈🔔 目前告警〉面板，也在 **Alerting → Alert rules**。
+每條都附有具體的處理步驟。
+
+想親眼看它燒起來？`docker compose stop backend-api`，兩分鐘內告警就會亮。
+
+> 📖 儀表板逐一導覽、19 條規則的完整條件、門檻怎麼調、通知怎麼接 Slack／Email，
+> 全部在 **[docs/MONITORING.md](./docs/MONITORING.md)**。
 
 ### 5. 執行 k6 負載測試
 
@@ -160,10 +171,10 @@ vus............................: 50      min=50  max=50
 - **Frontend Dashboard** (React + Vite): 即時監控儀表板,讀取 REST API 呈現廠區與單機遙測
 - **Backend API** (ASP.NET Core): 提供 REST API 與 Prometheus metrics
 - **Simulator**: 多執行緒模擬 50+ 台設備發送遙測數據
-- **RabbitMQ**: 訊息佇列，處理遙測數據
+- **RabbitMQ**: 訊息佇列，處理遙測數據（同時透過 :15692 輸出佇列積壓指標）
 - **SQL Server**: 儲存遙測數據
-- **Prometheus**: 收集 metrics
-- **Grafana**: 視覺化監控儀表板
+- **Prometheus**: 同時收集 Backend API 與 RabbitMQ 的 metrics
+- **Grafana**: 儀表板與告警，皆由 `grafana/` 自動 provisioning
 
 > 📐 完整的架構圖（系統情境圖、容器部署圖、資料流時序圖、Clean Architecture 分層圖、Worker 狀態機）與技術決策說明，請見 **[docs/ARCHITECTURE.md](./docs/ARCHITECTURE.md)**。
 

@@ -13,13 +13,16 @@ services:
     ports:
       - "5672:5672"    # AMQP
       - "15672:15672"  # Management UI
+      - "15692:15692"  # Prometheus metrics (rabbitmq_prometheus plugin)
     volumes:
       - rabbitmq_data:/var/lib/rabbitmq
-      # Lifts the guest loopback-only restriction so the API/simulator containers
-      # can authenticate over the Docker network (see rabbitmq.conf for details).
+      # Broker config: lifts the guest loopback-only restriction so the API/simulator
+      # containers can authenticate over the Docker network, and switches the
+      # Prometheus plugin to per-queue (per-object) metrics so queue backlog can be
+      # graphed and alerted on per queue. See rabbitmq.conf for the full rationale.
       # Mounted into conf.d/ (merged, loads after the image's own default-user
       # config) so it never conflicts with RABBITMQ_DEFAULT_USER handling.
-      - ./rabbitmq.conf:/etc/rabbitmq/conf.d/20-loopback.conf:ro
+      - ./rabbitmq.conf:/etc/rabbitmq/conf.d/20-factory-iot.conf:ro
     healthcheck:
       test: ["CMD", "rabbitmq-diagnostics", "-q", "ping"]
       interval: 10s
@@ -66,8 +69,13 @@ services:
       - "--web.console.templates=/usr/share/prometheus/consoles"
 
   # ──────────────────────────────────────────────
-  # Dashboards
+  # Dashboards & Alerting
   # ──────────────────────────────────────────────
+  # Everything is provisioned from files under ./grafana — data source, dashboards
+  # and alert rules all appear automatically on first boot, so nothing has to be
+  # clicked together in the UI. Editing a file + `docker compose restart grafana`
+  # is the way to change any of it (provisioned objects are read-only in the UI).
+  # See docs/MONITORING.md.
   grafana:
     image: grafana/grafana:10.4.2
     container_name: grafana
@@ -77,8 +85,25 @@ services:
     environment:
       GF_SECURITY_ADMIN_USER: admin
       GF_SECURITY_ADMIN_PASSWORD: admin
+      GF_USERS_DEFAULT_THEME: dark
+      # Land on the MQ backlog dashboard straight after login instead of the
+      # generic Grafana welcome page.
+      GF_DASHBOARDS_DEFAULT_HOME_DASHBOARD_PATH: /etc/grafana/dashboards/10-mq-ingestion-pipeline.json
+      # Optional e-mail delivery for the provisioned alerts. Alerts always show up
+      # in the Grafana UI (and on the dashboard's alert panel) without any of this;
+      # set these in a .env file only if you also want mail. See docs/MONITORING.md.
+      GF_SMTP_ENABLED: "${GF_SMTP_ENABLED:-false}"
+      GF_SMTP_HOST: "${GF_SMTP_HOST:-}"
+      GF_SMTP_USER: "${GF_SMTP_USER:-}"
+      GF_SMTP_PASSWORD: "${GF_SMTP_PASSWORD:-}"
+      GF_SMTP_FROM_ADDRESS: "${GF_SMTP_FROM_ADDRESS:-grafana@factory.local}"
     volumes:
       - grafana_data:/var/lib/grafana
+      # Data source + dashboard provider + alert rules / contact points / policies.
+      - ./grafana/provisioning:/etc/grafana/provisioning:ro
+      # Dashboard JSON. Kept outside /var/lib/grafana on purpose so the bind mount
+      # is not nested inside the grafana_data volume.
+      - ./grafana/dashboards:/etc/grafana/dashboards:ro
     depends_on:
       - prometheus
 
