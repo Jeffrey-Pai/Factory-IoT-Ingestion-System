@@ -156,6 +156,29 @@ flowchart LR
 - ✅ 統計是**終身**的，不受保留期影響 —— 原始資料被清掉後，`MaxTemperature` 仍是這台機台史上最高溫（對機台名冊來說這才是想知道的答案）
 - ⚠️ 累加不可逆，所以每個桶只能被計入一次 —— 靠 `RollupCheckpoints` 在**同一個交易**內保證
 
+#### 名冊 + 即時尾巴：為什麼要疊第二層
+
+名冊只到**最後一個封閉的分鐘桶**為止。桶要等 `RollupLagSeconds`（預設 120 秒）過後才算封閉，加上桶寬 1 分鐘與 worker 的 30 秒週期，名冊的 `LastSeen` 結構性地落後現在 **2～3.5 分鐘**。
+
+對「這台機台跑得如何」沒差；對「這台機台現在還活著嗎」是錯的 —— 而前端正是拿 `LastSeen` 判斷即時燈號（門檻 30 秒）。名冊單獨供應時，**每台健康機台都會亮灰燈、都顯示「3 分前」**。
+
+所以 `/api/v1/machines` 疊了一層即時尾巴：
+
+```
+        名冊（終身，落後 2～3 分鐘）        原始列（尾巴）
+├────────────────────────────────────┤├──────────────────┤
+0                              浮水印+1分鐘              now
+                                    ↑
+                     兩段的交界 —— 不重疊、也不留空隙
+```
+
+- **起點取自浮水印**：`RollupCheckpoints` 的下一個桶邊界之前都已經在名冊裡，從那裡開始接就不會重複計入
+- **先讀名冊、後讀浮水印**：兩次讀取之間若剛好有一輪聚合 commit，那個桶會**兩邊都沒有**（下一次輪詢就補回來）。反過來讀則會**兩邊都有** —— 重複計入一個只能累加的總計是沒辦法回頭修的
+- **寬度是聚合的落後量，不是資料庫的年齡**：健康時只有 2～3 分鐘的原始列，落在 `(Timestamp, Id)` 叢集索引的尾端幾頁，仍是範圍 seek
+- **`RosterTailMinutes`（預設 15 分）是安全上限**：只有聚合停擺或關閉時才會生效。這時名冊的**總計會少算**沒被聚合的那段，但 `LastSeen` 仍然正確 —— 寧可回答得不完整，也不要在每次輪詢時掃一張無上限成長的表
+
+順帶一提，這也讓 `DataRetention__Enabled=false`（完全關掉保留期）時機台總覽還能用：沒有浮水印就整段走 `RosterTailMinutes` 的視窗。
+
 ---
 
 ## 4. 熱層的實體結構修正
@@ -260,7 +283,7 @@ var minuteRollupCutoff = Earlier(now - MinuteRollupHours, hourFrontier);
 | ≤ 3 小時（`RawQueryWindowMinutes`） | 🔥 熱層原始列 | **秒級、即時** | 最多 54 萬列 |
 | 3 小時 ～ 30 天 | 🌤️ Minute 桶 | 分鐘級，落後 1～2 分鐘 | 24 小時 = 7.2 萬列 |
 | > 30 天 | ❄️ Hour 桶 | 小時級 | 1 年 = 43.8 萬列 |
-| `/api/v1/machines` | 📋 名冊 | 終身累計 | **50 列** |
+| `/api/v1/machines` | 📋 名冊 **+ 🔥 熱層尾巴** | 終身累計，`LastSeen` **秒級即時** | 50 列 + 2～3 分鐘的原始列 |
 | `/telemetry/{id}/latest`、`/sensors/{id}/readings` | 🔥 永遠熱層 | 逐筆原始 | seek + N 列 |
 
 前端目前的四個預設視窗剛好落在正確的位置：
@@ -274,7 +297,7 @@ var minuteRollupCutoff = Earlier(now - MinuteRollupHours, hourFrontier);
 
 | 查詢 | 修改前 | 修改後 |
 |------|--------|--------|
-| `/api/v1/machines`（每 5 秒） | 掃描全表，**無上限成長** | 讀 50 列，固定成本 |
+| `/api/v1/machines`（每 5 秒） | 掃描全表，**無上限成長** | 讀 50 列 + 2～3 分鐘的尾巴，固定成本 |
 | `/fleet/status?windowMinutes=1440` | 掃 432 萬列 | 掃 7.2 萬列 |
 | `/telemetry/{id}/stats?windowMinutes=1440` | 掃 8.6 萬列 | 掃 1,440 列 |
 | 資料庫大小 | 每天 +1.5～2 GB，**永不停止** | **穩定在 ~2 GB** |
@@ -456,7 +479,7 @@ DataRetention__HourRollupHours: "17520"       # 小時桶 = 2 年
 | `Entities/TelemetryRollup.cs` 等 | 聚合桶、狀態桶、浮水印、機台名冊 |
 | `DataLifecycleRepository.cs` | 逐桶聚合、名冊累加、分批清理、狀態報告 |
 | `DataLifecycleWorker.cs` | 排程、追進度預算、cutoff 夾制、指標 |
-| `TelemetryRepository.cs` | 依視窗寬度選層；名冊查詢取代全表 GROUP BY |
+| `TelemetryRepository.cs` | 依視窗寬度選層；名冊查詢取代全表 GROUP BY，並疊加尚未聚合的原始列讓 `LastSeen` 即時 |
 | `TelemetryIngestionWorker.cs` | Channel 改為有界，滿了就對 RabbitMQ 施加背壓 |
 | `Program.cs` | 註冊設定與 worker；新增 `/api/v1/data-lifecycle` |
 | `appsettings.json` / `docker-compose.yml` | `DataRetention` 設定區段 |

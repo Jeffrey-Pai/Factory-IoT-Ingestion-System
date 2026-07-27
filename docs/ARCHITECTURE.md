@@ -327,6 +327,10 @@ erDiagram
 
 每台機台一列的**終身**累計，由 lifecycle worker 在每個分鐘桶完成時往前累加。`/api/v1/machines` 讀它而不是重算全表 `GROUP BY`，所以成本固定 50 列、不隨歷史長度成長。統計不受保留期影響 —— 原始資料清掉後，`MaxTemperature` 仍是這台機台史上最高溫。
 
+**但名冊只到「最後一個封閉的分鐘桶」為止。** 這是預聚合換來固定成本的必然代價：桶要等 `RollupLagSeconds` 過後才算封閉，所以名冊的 `LastSeen` 結構性地落後現在 2～3 分鐘。對「這台機台跑得如何」沒差，對「這台機台現在還活著嗎」是錯的 —— 而後者正是前端拿 `LastSeen` 點燈號用的。
+
+所以 `/api/v1/machines` **同時讀兩層**：名冊負責長歷史，再疊上聚合浮水印之後的原始列補足最近幾分鐘。疊加的寬度是聚合工作自己的落後量（而不是資料庫的年齡），所以查詢依然有界；`DataRetention__RosterTailMinutes` 只是聚合停擺／關閉時的安全上限。細節見 [DATA-LIFECYCLE.md](./DATA-LIFECYCLE.md#machinesummaries把成長無上限的查詢變成固定成本)。
+
 ---
 
 ## 8. 可觀測性（Observability）
@@ -428,4 +432,5 @@ Worker 落庫時透過 `SensorReading.FromTelemetry(...)` 把每筆寬表快照�
 - 🗄️ [資料生命週期 DATA-LIFECYCLE.md](./DATA-LIFECYCLE.md) — 冷熱分層、預聚合、保留期、容量規劃與流量成長時的擴充路線
 - 🛠️ [操作手冊 OPERATIONS.md](./OPERATIONS.md) — 啟動、驗證、監控設定、壓測、故障排除
 - 👩‍💻 [開發者指南 DEVELOPMENT.md](./DEVELOPMENT.md) — 本機開發、加 API、加 Migration、除錯
+- 🚀 [發布流程 RELEASE.md](./RELEASE.md) — 改完程式碼後怎麼重新打包、發布、驗證、回滾
 - 📄 [根目錄 README.md](../README.md) — 快速開始

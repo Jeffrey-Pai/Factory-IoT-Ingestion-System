@@ -10,7 +10,9 @@ import {
   formatRelative,
   formatTemp,
 } from "../lib/format";
-import { freshness } from "../lib/status";
+import { freshness, liveThresholdMs } from "../lib/status";
+import { useNow } from "../live/useNow";
+import { useRefresh } from "../live/RefreshProvider";
 import { Card, CardHeader } from "../components/ui/Card";
 import { StatTile } from "../components/ui/StatTile";
 import { StatusBadge } from "../components/ui/StatusBadge";
@@ -22,6 +24,8 @@ import { TelemetryChart } from "../components/TelemetryChart";
 export function MachineDetail() {
   const { machineId = "" } = useParams();
   const [windowMinutes, setWindowMinutes] = useState<number>(DEFAULT_WINDOW_MINUTES);
+  const now = useNow();
+  const { refetchInterval } = useRefresh();
 
   const statsQ = useMachineStats(machineId, windowMinutes);
   const latestQ = useLatestTelemetry(machineId, CHART_POINTS);
@@ -46,7 +50,9 @@ export function MachineDetail() {
   const stats = statsQ.data ?? null;
   const latest = readings[0];
   const lastSeenIso = latest?.timestamp ?? stats?.lastReading;
-  const live = lastSeenIso ? freshness(lastSeenIso) === "live" : false;
+  const live = lastSeenIso
+    ? freshness(lastSeenIso, now, liveThresholdMs(refetchInterval)) === "live"
+    : false;
 
   const initialLoading = latestQ.isLoading && statsQ.isLoading;
   const hardError = latestQ.isError && statsQ.isError;
@@ -68,7 +74,7 @@ export function MachineDetail() {
             {lastSeenIso && (
               <span className="inline-flex items-center gap-1.5 text-xs text-muted">
                 <LiveDot live={live} />
-                {live ? "即時回報中" : `最後回報 ${formatRelative(lastSeenIso)}`}
+                {live ? "即時回報中" : `最後回報 ${formatRelative(lastSeenIso, now)}`}
               </span>
             )}
             {latest && <StatusBadge status={latest.status} />}
@@ -130,7 +136,7 @@ export function MachineDetail() {
             />
             <StatTile
               label="最後回報"
-              value={lastSeenIso ? formatRelative(lastSeenIso) : "—"}
+              value={lastSeenIso ? formatRelative(lastSeenIso, now) : "—"}
               sub={lastSeenIso ? formatDateTime(lastSeenIso) : undefined}
               icon={<Clock className="h-4 w-4" />}
             />

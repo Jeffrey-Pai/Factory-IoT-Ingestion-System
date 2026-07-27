@@ -110,6 +110,12 @@ services:
       DataRetention__RawSensorReadingHours: "24"
       DataRetention__MinuteRollupHours: "720"
       DataRetention__HourRollupHours: "17520"
+      # How far back /api/v1/machines may look for readings not yet aggregated.
+      # The roster is only as fresh as the last closed bucket, so without this
+      # overlay every machine reports "last seen 3 minutes ago" and the
+      # dashboard draws a healthy fleet as stale. Only a safety clamp: it binds
+      # solely when aggregation has stalled or is switched off.
+      DataRetention__RosterTailMinutes: "15"
     depends_on:
       rabbitmq:
         condition: service_healthy

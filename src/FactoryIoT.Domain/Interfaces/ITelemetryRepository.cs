@@ -16,6 +16,12 @@ public interface ITelemetryRepository
     /// reported, ordered by machine id — the fleet roster with health metrics attached. The
     /// figures are lifetime totals and are not narrowed by retention.
     /// </summary>
+    /// <remarks>
+    /// Unlike the windowed queries below, this one is fresh to the second: readings that have
+    /// arrived since the last aggregation pass are included, so <c>LastSeen</c> is the machine's
+    /// genuine most recent reading rather than the aggregation job's high-water mark. Callers may
+    /// treat it as a liveness signal.
+    /// </remarks>
     Task<IReadOnlyList<MachineTelemetrySummary>> GetMachineSummariesAsync(CancellationToken cancellationToken = default);
 
     /// <summary>

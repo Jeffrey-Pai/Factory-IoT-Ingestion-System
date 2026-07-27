@@ -32,6 +32,17 @@ public sealed class TelemetryRepositoryTests
             Timestamp = timestamp,
         };
 
+    /// <summary>
+    /// Marks minute aggregation as complete through <paramref name="lastCompletedBucketStart"/>.
+    /// Readings at or after the following bucket boundary are the roster's live tail.
+    /// </summary>
+    private static void Checkpoint(FactoryIoTDbContext context, DateTimeOffset lastCompletedBucketStart) =>
+        context.RollupCheckpoints.Add(new RollupCheckpoint
+        {
+            Granularity = RollupGranularity.Minute,
+            LastCompletedBucketStart = lastCompletedBucketStart,
+        });
+
     private static TelemetryRollup Bucket(
         string machineId,
         DateTimeOffset bucketStart,
@@ -170,8 +181,9 @@ public sealed class TelemetryRepositoryTests
                 MinPressure = 2, MaxPressure = 4, SumPressure = 6,
             });
 
-        // Raw rows the roster does not derive from: the roster is maintained forward by the
-        // lifecycle worker, never recomputed here, so these must not affect the answer.
+        // Raw rows already inside the aggregated range. They are represented in the roster totals
+        // above, so re-reading them here would count the same readings twice.
+        Checkpoint(context, now);
         context.Telemetries.Add(Reading("EQP-009", 500, 500, "Running", now));
         await context.SaveChangesAsync();
         var repository = CreateRepository(context);
@@ -206,6 +218,152 @@ public sealed class TelemetryRepositoryTests
 
         Assert.Equal(0d, summaries[0].AvgTemperature);
         Assert.Equal(0d, summaries[0].AvgPressure);
+    }
+
+    // ── Roster tier: the live tail ──────────────────────────────────────────────────────────
+    //
+    // The roster only advances when a minute bucket closes, so on its own it reports a machine
+    // reporting once a second as last seen minutes ago — which is what put a grey "stale" dot
+    // against every healthy machine on the dashboard. These cover the overlay that fixes it, and
+    // the boundary that keeps the overlay from counting anything the roster already holds.
+
+    [Fact]
+    public async Task GetMachineSummariesAsync_OverlaysReadingsNewerThanTheAggregationFrontier()
+    {
+        using var context = TestDatabase.CreateContext();
+        var now = DateTimeOffset.UtcNow;
+        var checkpoint = RollupBucket.Floor(now.AddMinutes(-3), RollupGranularity.Minute);
+
+        context.MachineSummaries.Add(new MachineSummary
+        {
+            MachineId = "EQP-001",
+            SampleCount = 2,
+            FirstSeen = checkpoint,
+            LastSeen = checkpoint.AddSeconds(30),
+            MinTemperature = 10, MaxTemperature = 20, SumTemperature = 30,
+            MinPressure = 2, MaxPressure = 4, SumPressure = 6,
+        });
+        Checkpoint(context, checkpoint);
+
+        // Two readings that landed after the last closed bucket — exactly the window the roster
+        // cannot know about. The newest is seconds old, which is what "live" has to reflect.
+        var frontier = RollupBucket.Next(checkpoint, RollupGranularity.Minute);
+        context.Telemetries.AddRange(
+            Reading("EQP-001", 40, 8, "Running", frontier.AddSeconds(10)),
+            Reading("EQP-001", 60, 10, "Running", now.AddSeconds(-2)));
+        await context.SaveChangesAsync();
+        var repository = CreateRepository(context);
+
+        var summary = Assert.Single(await repository.GetMachineSummariesAsync());
+
+        Assert.Equal(now.AddSeconds(-2), summary.LastSeen); // the real latest reading, not the frontier
+        Assert.Equal(checkpoint, summary.FirstSeen);        // lifetime start is unchanged
+        Assert.Equal(4L, summary.SampleCount);              // 2 aggregated + 2 still raw
+        Assert.Equal(10d, summary.MinTemperature, 3);       // extent of both ranges
+        Assert.Equal(60d, summary.MaxTemperature, 3);
+        Assert.Equal(32.5d, summary.AvgTemperature, 3);     // (30 + 40 + 60) / 4
+        Assert.Equal(2d, summary.MinPressure, 3);
+        Assert.Equal(10d, summary.MaxPressure, 3);
+        Assert.Equal(6d, summary.AvgPressure, 3);           // (6 + 8 + 10) / 4
+    }
+
+    [Fact]
+    public async Task GetMachineSummariesAsync_ExcludesReadingsTheRosterAlreadyHolds()
+    {
+        using var context = TestDatabase.CreateContext();
+        var now = DateTimeOffset.UtcNow;
+        var checkpoint = RollupBucket.Floor(now.AddMinutes(-3), RollupGranularity.Minute);
+
+        context.MachineSummaries.Add(new MachineSummary
+        {
+            MachineId = "EQP-001",
+            SampleCount = 1,
+            FirstSeen = checkpoint,
+            LastSeen = checkpoint,
+            MinTemperature = 50, MaxTemperature = 50, SumTemperature = 50,
+            MinPressure = 5, MaxPressure = 5, SumPressure = 5,
+        });
+        Checkpoint(context, checkpoint);
+
+        // Raw rows still on disk inside the aggregated range. Retention keeps raw telemetry for
+        // days after its bucket closes, so these are the normal case — and counting them again
+        // would inflate a running total that has no way to subtract the duplicate.
+        context.Telemetries.AddRange(
+            Reading("EQP-001", 50, 5, "Running", checkpoint),
+            Reading("EQP-001", 50, 5, "Running", checkpoint.AddSeconds(59)));
+        await context.SaveChangesAsync();
+        var repository = CreateRepository(context);
+
+        var summary = Assert.Single(await repository.GetMachineSummariesAsync());
+
+        Assert.Equal(1L, summary.SampleCount);
+        Assert.Equal(checkpoint, summary.LastSeen);
+    }
+
+    [Fact]
+    public async Task GetMachineSummariesAsync_SurfacesAMachineWhoseFirstBucketHasNotClosedYet()
+    {
+        using var context = TestDatabase.CreateContext();
+        var now = DateTimeOffset.UtcNow;
+        Checkpoint(context, RollupBucket.Floor(now.AddMinutes(-3), RollupGranularity.Minute));
+
+        // No roster row at all: this machine started reporting less than a bucket ago. It should
+        // appear immediately rather than after the rollup job next runs.
+        context.Telemetries.AddRange(
+            Reading("EQP-050", 70, 7, "Running", now.AddSeconds(-20)),
+            Reading("EQP-050", 90, 9, "Warning", now.AddSeconds(-5)));
+        await context.SaveChangesAsync();
+        var repository = CreateRepository(context);
+
+        var summary = Assert.Single(await repository.GetMachineSummariesAsync());
+
+        Assert.Equal("EQP-050", summary.MachineId);
+        Assert.Equal(2L, summary.SampleCount);
+        Assert.Equal(now.AddSeconds(-20), summary.FirstSeen);
+        Assert.Equal(now.AddSeconds(-5), summary.LastSeen);
+        Assert.Equal(80d, summary.AvgTemperature, 3);
+    }
+
+    [Fact]
+    public async Task GetMachineSummariesAsync_WithoutACheckpoint_StillReportsLiveMachines()
+    {
+        using var context = TestDatabase.CreateContext();
+        var now = DateTimeOffset.UtcNow;
+
+        // No checkpoint and no roster rows: retention switched off, or a database that has not
+        // completed its first pass. The fleet page has to keep working in that configuration.
+        context.Telemetries.Add(Reading("EQP-001", 55, 5, "Running", now.AddSeconds(-3)));
+        await context.SaveChangesAsync();
+        var repository = CreateRepository(context);
+
+        var summary = Assert.Single(await repository.GetMachineSummariesAsync());
+
+        Assert.Equal("EQP-001", summary.MachineId);
+        Assert.Equal(1L, summary.SampleCount);
+        Assert.Equal(now.AddSeconds(-3), summary.LastSeen);
+    }
+
+    [Fact]
+    public async Task GetMachineSummariesAsync_ClampsTheTailWhenAggregationHasStalled()
+    {
+        using var context = TestDatabase.CreateContext();
+        var now = DateTimeOffset.UtcNow;
+
+        // Aggregation has not advanced in two hours. Trusting the frontier would widen the overlay
+        // without limit — the unbounded scan the roster tier exists to prevent — so the clamp wins
+        // and the answer is knowingly incomplete rather than knowingly expensive.
+        Checkpoint(context, RollupBucket.Floor(now.AddHours(-2), RollupGranularity.Minute));
+        context.Telemetries.AddRange(
+            Reading("EQP-001", 100, 10, "Running", now.AddMinutes(-30)), // outside the clamp
+            Reading("EQP-001", 20, 2, "Running", now.AddMinutes(-5)));   // inside it
+        await context.SaveChangesAsync();
+        var repository = CreateRepository(context, o => o.RosterTailMinutes = 15);
+
+        var summary = Assert.Single(await repository.GetMachineSummariesAsync());
+
+        Assert.Equal(1L, summary.SampleCount);
+        Assert.Equal(now.AddMinutes(-5), summary.LastSeen);
+        Assert.Equal(20d, summary.MaxTemperature, 3); // the older reading was not read at all
     }
 
     // ── Tier routing ────────────────────────────────────────────────────────────────────────

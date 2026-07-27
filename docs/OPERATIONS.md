@@ -103,6 +103,8 @@ docker compose ps
 > `windowMinutes` 需為 1–43200（上限 30 天）；超出範圍回 **400**。分析端點的聚合全部在 SQL Server 端以 `GROUP BY` 完成，API 不會為了統計把原始資料整批撈回記憶體。
 
 > **關於資料新鮮度**：`stats` 與 `fleet/status` 會依視窗寬度自動選擇儲存層。**3 小時以內**的視窗讀原始逐筆資料（秒級即時）；更寬的視窗讀預先聚合的時間桶，**會落後 1～2 分鐘**，換來的是掃描量降到 1/60。原始資料只保留數十小時，更久以前的歷史只剩聚合值。完整說明見 [DATA-LIFECYCLE.md](./DATA-LIFECYCLE.md)。
+>
+> `machines` 是例外：它同時讀名冊層與尚未聚合的原始列，所以 `lastSeen` 是**秒級即時**的，可以直接拿來當機台存活判斷（前端的即時燈號就是用它）。
 
 ---
 
@@ -441,6 +443,7 @@ docker compose down -v
 | `DataRetention__MinuteRollupHours` | `720` | 每分鐘聚合桶保留時數（30 天） |
 | `DataRetention__HourRollupHours` | `17520` | 每小時聚合桶保留時數（2 年） |
 | `DataRetention__RawQueryWindowMinutes` | `180` | 視窗在此之內讀原始資料，超過則讀聚合桶 |
+| `DataRetention__RosterTailMinutes` | `15` | `/api/v1/machines` 疊加「尚未聚合的原始列」時最多回看多久。名冊本身落後 2～3 分鐘，這層疊加才讓 `LastSeen`／即時燈號是真的即時。**只是安全上限**：聚合正常時完全不會生效，聚合停擺時它讓查詢維持有界（代價是總計會少算） |
 | `DataRetention__RollupIntervalSeconds` | `30` | 聚合／清理的執行間隔 |
 | `DataRetention__RollupLagSeconds` | `120` | 時間桶封閉後要再等多久才聚合（等在途資料落地） |
 | `DataRetention__MaxBucketsPerPass` | `240` | 每輪最多聚合幾個桶（追進度用的節流） |

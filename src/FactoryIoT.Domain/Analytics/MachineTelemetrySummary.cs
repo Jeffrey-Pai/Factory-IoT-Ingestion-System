@@ -5,12 +5,21 @@ namespace FactoryIoT.Domain.Analytics;
 /// used to answer the "give me the whole fleet at a glance" question without pulling raw rows.
 /// </summary>
 /// <remarks>
+/// <para>
 /// This is a read-model (an aggregate projection), not a persisted entity. It is served from the
 /// <c>MachineSummaries</c> tier — one running row per machine, folded forward by the rollup job —
 /// so the query stays a fifty-row read instead of the unbounded <c>GROUP BY MachineId</c> over the
 /// whole raw table it used to be. The figures are therefore lifetime totals that survive
 /// retention: <c>MaxTemperature</c> is the hottest the machine has ever run, not the hottest
 /// within whatever raw history is still on disk.
+/// </para>
+/// <para>
+/// On top of that tier the repository overlays the readings the rollup job has not folded in yet,
+/// so <c>LastSeen</c> is the machine's genuine latest reading. That matters because <c>LastSeen</c>
+/// is the field consumers read as "is this machine alive?" — served from the roster alone it would
+/// trail the wall clock by the rollup job's safety lag, and every healthy machine would look like
+/// it stopped reporting minutes ago.
+/// </para>
 /// </remarks>
 public sealed record MachineTelemetrySummary(
     string MachineId,
