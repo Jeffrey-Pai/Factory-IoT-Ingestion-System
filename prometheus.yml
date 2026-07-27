@@ -11,3 +11,17 @@ scrape_configs:
     metrics_path: /metrics
     static_configs:
       - targets: ["backend-api:8080"]
+
+  # RabbitMQ broker metrics, served by the rabbitmq_prometheus plugin on port 15692
+  # (the plugin is enabled by default in the official image).
+  #
+  # This job is what makes queue backlog observable at all: telemetry_* comes from
+  # the worker and only says how much it managed to consume, never how much is still
+  # waiting. rabbitmq_queue_messages_ready / rabbitmq_queue_consumers come from here.
+  #
+  # rabbitmq.conf sets prometheus.return_per_object_metrics = true so these series
+  # carry vhost/queue labels.
+  - job_name: "rabbitmq"
+    metrics_path: /metrics
+    static_configs:
+      - targets: ["rabbitmq:15692"]

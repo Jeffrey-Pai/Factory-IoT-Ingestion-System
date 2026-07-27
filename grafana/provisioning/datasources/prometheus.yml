@@ -1,0 +1,22 @@
+# Prometheus data source, created automatically on Grafana boot.
+#
+# The UID is pinned because every provisioned dashboard panel and every alert rule
+# references it by UID. Do not rename it without updating grafana/dashboards/*.json
+# and grafana/provisioning/alerting/*.yml as well.
+apiVersion: 1
+
+datasources:
+  - name: Prometheus
+    uid: factory-iot-prometheus
+    type: prometheus
+    access: proxy
+    # Container name on the compose network — not localhost, which inside the
+    # Grafana container would point at Grafana itself.
+    url: http://prometheus:9090
+    isDefault: true
+    editable: false
+    jsonData:
+      httpMethod: POST
+      # Must match `scrape_interval` in prometheus.yml so $__rate_interval resolves
+      # to a window that actually contains samples.
+      timeInterval: 15s
