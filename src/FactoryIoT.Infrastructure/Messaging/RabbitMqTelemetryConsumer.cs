@@ -3,6 +3,7 @@ using System.Text.Json;
 using FactoryIoT.Application.Common.Interfaces;
 using FactoryIoT.Domain.Entities;
 using Microsoft.Extensions.Logging;
+using Prometheus;
 using RabbitMQ.Client;
 using RabbitMQ.Client.Events;
 
@@ -19,6 +20,13 @@ public sealed class RabbitMqTelemetryConsumer : ITelemetryConsumer
     // Without a prefetch limit an autoAck=false consumer is handed the entire backlog at
     // once, which balloons memory and starves the batch processor of backpressure.
     private const ushort PrefetchCount = 500;
+
+    // Messages that failed twice and were discarded rather than requeued forever. Any
+    // non-zero rate here means telemetry is being thrown away and needs investigating —
+    // the log carries the exception, this carries the signal.
+    private static readonly Counter MessagesDroppedCounter = Metrics.CreateCounter(
+        "telemetry_messages_dropped_total",
+        "Total number of telemetry messages discarded after failing again on redelivery");
 
     private readonly IConnection _connection;
     private readonly IChannel _channel;
@@ -37,6 +45,13 @@ public sealed class RabbitMqTelemetryConsumer : ITelemetryConsumer
     {
         logger.LogInformation("Creating RabbitMQ connection to {HostName}:{Port} as user '{User}'...",
             config.Host, config.Port, config.Username);
+
+        // Export the drop counter at zero from startup. The class holds no other static
+        // state that the happy path touches (QueueName/PrefetchCount are consts, inlined
+        // at compile time), so without this the type initializer would not run until the
+        // first drop — and a series that only materializes once things break is one you
+        // cannot graph or alert on beforehand.
+        MessagesDroppedCounter.Publish();
 
         var factory = config.CreateConnectionFactory();
         var connection = await factory.CreateConnectionAsync(cancellationToken);
@@ -121,9 +136,25 @@ public sealed class RabbitMqTelemetryConsumer : ITelemetryConsumer
         }
         catch (Exception ex)
         {
-            _logger.LogError(ex, "Message #{MessageNumber}: Error processing message. Rejecting and requeueing.", messageNumber);
-            // On error, reject and requeue
-            await _channel.BasicNackAsync(eventArgs.DeliveryTag, multiple: false, requeue: true);
+            // Requeue once, then give up on the message.
+            //
+            // An unconditional requeue turns any *deterministic* failure into a hot loop:
+            // the broker redelivers immediately, the same exception fires, and the message
+            // goes straight back — so the queue can never drain while the CPU and the log
+            // fill up. Bounding it to a single retry keeps genuine transient blips
+            // recoverable without letting one bad message hold the backlog open.
+            if (!eventArgs.Redelivered)
+            {
+                _logger.LogError(ex, "Message #{MessageNumber}: Error processing message. Requeueing for one retry.", messageNumber);
+                await _channel.BasicNackAsync(eventArgs.DeliveryTag, multiple: false, requeue: true);
+                return;
+            }
+
+            MessagesDroppedCounter.Inc();
+            _logger.LogCritical(ex,
+                "Message #{MessageNumber}: Error processing message again after redelivery. Dropping it so the queue keeps draining.",
+                messageNumber);
+            await _channel.BasicNackAsync(eventArgs.DeliveryTag, multiple: false, requeue: false);
         }
     }
 
