@@ -4,6 +4,7 @@ using FactoryIoT.Infrastructure.Persistence;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.EntityFrameworkCore.Infrastructure;
 using Microsoft.EntityFrameworkCore.Metadata;
+using Microsoft.EntityFrameworkCore.Migrations;
 using Microsoft.EntityFrameworkCore.Storage.ValueConversion;
 
 #nullable disable
@@ -11,9 +12,11 @@ using Microsoft.EntityFrameworkCore.Storage.ValueConversion;
 namespace FactoryIoT.Infrastructure.Migrations
 {
     [DbContext(typeof(FactoryIoTDbContext))]
-    partial class FactoryIoTDbContextModelSnapshot : ModelSnapshot
+    [Migration("20260727090000_TieredStorage")]
+    partial class TieredStorage
     {
-        protected override void BuildModel(ModelBuilder modelBuilder)
+        /// <inheritdoc />
+        protected override void BuildTargetModel(ModelBuilder modelBuilder)
         {
 #pragma warning disable 612, 618
             modelBuilder

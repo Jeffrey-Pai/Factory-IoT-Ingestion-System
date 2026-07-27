@@ -12,7 +12,7 @@ namespace FactoryIoT.Domain.Analytics;
 /// </remarks>
 public sealed record TelemetryStatistics(
     string MachineId,
-    int SampleCount,
+    long SampleCount,
     DateTimeOffset FirstReading,
     DateTimeOffset LastReading,
     double MinTemperature,

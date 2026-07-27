@@ -28,5 +28,13 @@ Accept: application/json
 GET {{FactoryIoT.Presentation_HostAddress}}/api/v1/fleet/status?windowMinutes=60
 Accept: application/json
 
+### Same window, wide enough to be served from pre-aggregated buckets instead of raw rows
+GET {{FactoryIoT.Presentation_HostAddress}}/api/v1/fleet/status?windowMinutes=1440
+Accept: application/json
+
+### Storage tiers — what each holds, how far behind aggregation is, retention in force
+GET {{FactoryIoT.Presentation_HostAddress}}/api/v1/data-lifecycle
+Accept: application/json
+
 ### Prometheus metrics
 GET {{FactoryIoT.Presentation_HostAddress}}/metrics

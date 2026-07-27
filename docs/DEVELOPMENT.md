@@ -48,16 +48,17 @@ Factory-IoT-Ingestion-System/
 ├─ docs/                              # ← 你在這裡
 ├─ src/
 │  ├─ FactoryIoT.Domain/             # 實體 + 儲存庫介面（無外部相依）
-│  │  ├─ Entities/                   #   Telemetry, SensorReading
-│  │  ├─ Analytics/                  #   MachineTelemetrySummary, TelemetryStatistics, FleetStatus（分析 read-model）
-│  │  └─ Interfaces/                 #   ITelemetryRepository, ...
+│  │  ├─ Entities/                   #   Telemetry, SensorReading, TelemetryRollup, MachineSummary, RollupBucket
+│  │  ├─ Analytics/                  #   MachineTelemetrySummary, TelemetryStatistics, FleetStatus, DataLifecycleReport（read-model）
+│  │  └─ Interfaces/                 #   ITelemetryRepository, IDataLifecycleRepository, ...
 │  ├─ FactoryIoT.Application/        # DTO + 應用介面（相依 Domain）
 │  │  ├─ DTOs/
 │  │  └─ Common/Interfaces/          #   ITelemetryConsumer, IMessagePublisher
 │  ├─ FactoryIoT.Infrastructure/     # 外部技術實作（相依 Domain + Application）
 │  │  ├─ Messaging/                  #   RabbitMQ Consumer / Publisher / Config
-│  │  ├─ Workers/                    #   TelemetryIngestionWorker（核心）
+│  │  ├─ Workers/                    #   TelemetryIngestionWorker（核心）, DataLifecycleWorker（聚合 + 保留期）
 │  │  ├─ Persistence/                #   DbContext / Repository
+│  │  ├─ Configuration/              #   DataRetentionOptions（保留期與聚合節奏）
 │  │  └─ Migrations/                 #   EF Core 遷移
 │  ├─ FactoryIoT.Presentation/       # Web API 入口（相依 Application + Infrastructure）
 │  │  ├─ Program.cs                  #   Minimal API + DI 組裝
@@ -210,7 +211,13 @@ app.MapGet("/api/v1/telemetry/{machineId}/health-score", async (
 
 ### 6.3 調整吞吐量參數
 
-批次大小、間隔、prefetch、重試次數等都集中在 `TelemetryIngestionWorker` 的常數與 `RabbitMqTelemetryConsumer.PrefetchCount`。參數清單見 [操作手冊第 11 節](./OPERATIONS.md#11-設定參數速查)。
+批次大小、間隔、prefetch、Channel 容量、重試次數等都集中在 `TelemetryIngestionWorker` 的常數與 `RabbitMqTelemetryConsumer.PrefetchCount`。參數清單見 [操作手冊第 11 節](./OPERATIONS.md#11-設定參數速查)。
+
+### 6.3.1 調整保留期與聚合節奏
+
+這些**不是**程式常數，而是 `DataRetentionOptions`（`appsettings.json` 的 `DataRetention` 區段，可用 `DataRetention__*` 環境變數覆寫），改完重啟即生效、不需要 migration。設計理由與容量試算見 [DATA-LIFECYCLE.md](./DATA-LIFECYCLE.md)。
+
+> ⚠️ 改 `Telemetry` 的欄位時記得：新欄位不會自動進入聚合層。要讓它出現在長時間視窗的查詢裡，得同時在 `TelemetryRollup` 加對應的 min/max/**sum** 欄位、在 `DataLifecycleRepository` 的兩個聚合方法裡加上投影。
 
 ### 6.4 SensorReading 路徑（已接上）
 
@@ -261,5 +268,6 @@ app.MapGet("/api/v1/telemetry/{machineId}/health-score", async (
 ## 延伸閱讀
 
 - 📐 [架構文件 ARCHITECTURE.md](./ARCHITECTURE.md)
+- 🗄️ [資料生命週期 DATA-LIFECYCLE.md](./DATA-LIFECYCLE.md)
 - 🛠️ [操作手冊 OPERATIONS.md](./OPERATIONS.md)
 - 📄 [根目錄 README.md](../README.md)

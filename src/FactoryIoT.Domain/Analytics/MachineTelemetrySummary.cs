@@ -5,14 +5,16 @@ namespace FactoryIoT.Domain.Analytics;
 /// used to answer the "give me the whole fleet at a glance" question without pulling raw rows.
 /// </summary>
 /// <remarks>
-/// This is a read-model (an aggregate projection), not a persisted entity: it is produced by a
-/// <c>GROUP BY MachineId</c> over the <c>Telemetries</c> table, so it carries only aggregate
-/// values (count, extents, averages) rather than any single row. The shape is intentionally flat
-/// so it maps directly to a translatable SQL projection (see <c>TelemetryRepository</c>).
+/// This is a read-model (an aggregate projection), not a persisted entity. It is served from the
+/// <c>MachineSummaries</c> tier — one running row per machine, folded forward by the rollup job —
+/// so the query stays a fifty-row read instead of the unbounded <c>GROUP BY MachineId</c> over the
+/// whole raw table it used to be. The figures are therefore lifetime totals that survive
+/// retention: <c>MaxTemperature</c> is the hottest the machine has ever run, not the hottest
+/// within whatever raw history is still on disk.
 /// </remarks>
 public sealed record MachineTelemetrySummary(
     string MachineId,
-    int SampleCount,
+    long SampleCount,
     DateTimeOffset FirstSeen,
     DateTimeOffset LastSeen,
     double MinTemperature,
