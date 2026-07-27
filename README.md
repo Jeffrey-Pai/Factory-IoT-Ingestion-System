@@ -9,6 +9,7 @@
 | 🗄️ [資料生命週期 DATA-LIFECYCLE.md](./docs/DATA-LIFECYCLE.md) | 冷熱分層、預聚合、保留期、容量規劃與擴充路線 | 擔心「資料越存越多怎麼辦」 |
 | 🛠️ [操作手冊 OPERATIONS.md](./docs/OPERATIONS.md) | 啟動、驗證、監控設定、壓測、故障排除 | 要把系統跑起來、維運 |
 | 👩‍💻 [開發者指南 DEVELOPMENT.md](./docs/DEVELOPMENT.md) | 本機開發、加 API、加 Migration、除錯 | 要改程式碼 |
+| 🚀 [發布流程 RELEASE.md](./docs/RELEASE.md) | 改完程式碼後怎麼重新打包、發布、驗證、回滾 | 改完了要發上去 |
 | ✅ [驗證指南 VERIFICATION_GUIDE.md](./VERIFICATION_GUIDE.md) | RabbitMQ→MSSQL 資料流驗證與診斷 | 排查資料未入庫問題 |
 | 🖥️ [前端儀表板 frontend/README.md](./frontend/README.md) | React 即時監控儀表板:安裝、開發、Docker | 想看資料視覺化畫面 |
 

@@ -3,7 +3,9 @@ import { Link, useNavigate } from "react-router-dom";
 import { ArrowDown, ArrowUp, ChevronsUpDown, ChevronRight, Search } from "lucide-react";
 import type { MachineSummary } from "../api/types";
 import { formatInt, formatPressure, formatRelative, formatTemp } from "../lib/format";
-import { freshness } from "../lib/status";
+import { freshness, liveThresholdMs } from "../lib/status";
+import { useNow } from "../live/useNow";
+import { useRefresh } from "../live/RefreshProvider";
 import { PRESSURE_DOMAIN, TEMP_DOMAIN } from "../lib/constants";
 import { cn } from "../lib/cn";
 import { RangeBar } from "./ui/RangeBar";
@@ -26,7 +28,9 @@ export function MachineTable({ machines }: { machines: MachineSummary[] }) {
     key: "machineId",
     dir: "asc",
   });
-  const now = Date.now();
+  const now = useNow();
+  const { refetchInterval } = useRefresh();
+  const threshold = liveThresholdMs(refetchInterval);
 
   const rows = useMemo(() => {
     const q = query.trim().toLowerCase();
@@ -107,7 +111,7 @@ export function MachineTable({ machines }: { machines: MachineSummary[] }) {
           </thead>
           <tbody>
             {rows.map((m) => {
-              const live = freshness(m.lastSeen, now) === "live";
+              const live = freshness(m.lastSeen, now, threshold) === "live";
               return (
                 <tr
                   key={m.machineId}

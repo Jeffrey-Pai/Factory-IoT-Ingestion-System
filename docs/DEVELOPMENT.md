@@ -270,4 +270,5 @@ app.MapGet("/api/v1/telemetry/{machineId}/health-score", async (
 - 📐 [架構文件 ARCHITECTURE.md](./ARCHITECTURE.md)
 - 🗄️ [資料生命週期 DATA-LIFECYCLE.md](./DATA-LIFECYCLE.md)
 - 🛠️ [操作手冊 OPERATIONS.md](./OPERATIONS.md)
+- 🚀 [發布流程 RELEASE.md](./RELEASE.md) — 改完之後怎麼重新打包發布
 - 📄 [根目錄 README.md](../README.md)

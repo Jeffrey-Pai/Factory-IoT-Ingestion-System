@@ -92,6 +92,27 @@ public sealed class DataRetentionOptions
     /// </summary>
     public int RawQueryWindowMinutes { get; set; } = 180;
 
+    /// <summary>
+    /// How far back the fleet roster may reach for readings the rollup job has not folded in yet.
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// The roster is only ever as fresh as the last <em>closed</em> minute bucket, which trails the
+    /// wall clock by a bucket width plus <see cref="RollupLagSeconds"/> — so on its own it reports
+    /// a machine reporting once a second as last seen three minutes ago. The roster query therefore
+    /// overlays the raw readings newer than the aggregation frontier, and this is the clamp on how
+    /// far back that overlay may look when the frontier is old or unknown.
+    /// </para>
+    /// <para>
+    /// It exists purely to bound the read: with a healthy rollup job the frontier is minutes old
+    /// and the clamp never binds. It only takes effect when aggregation has stalled or is switched
+    /// off, and then it trades completeness for a bounded query — the roster's totals under-report
+    /// the un-aggregated gap, but <c>LastSeen</c> stays truthful and the dashboard keeps working
+    /// instead of scanning an ever-growing table on every poll.
+    /// </para>
+    /// </remarks>
+    public int RosterTailMinutes { get; set; } = 15;
+
     /// <summary>Projects the retention windows into the Domain shape used by the lifecycle report.</summary>
     public RetentionWindows ToRetentionWindows() => new(
         RawTelemetryHours,
