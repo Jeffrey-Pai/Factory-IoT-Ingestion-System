@@ -318,6 +318,7 @@ Worker 會重新接上、開始追積壓（消化速率會暫時衝到遠高於 
 | ⬆ 上升 | 0 | **0** | 0 | ❌ **Worker 沒接上 MQ** — 看 backend-api 容器與 log |
 | ⬆ 上升 | 貼著 500 | ≥1 | 0 | ❌ consumer 收得到但處理不完 —— 卡在下游 |
 | ⬆ 上升 | 正常浮動 | ≥1 | ⬆ 上升 | ❌ **資料庫寫不進去** —— 資料堆在記憶體，別重啟容器 |
+| ⬆ 上升 | 正常浮動 | ≥1 | 查不到此指標 | ❌ **每則訊息都被 nack 重送** —— 消費回呼在丟例外，看下方疑難排解 |
 | 平穩偏高 | 正常 | ≥1 | 0 | ⚠️ 容量不足，消化長期略慢於發布 |
 | 0 | 0 | ≥1 | 0，但收不到訊息 | ℹ️ 上游沒在發（simulator 停了），不是故障 |
 
@@ -346,6 +347,7 @@ Worker 會重新接上、開始追積壓（消化速率會暫時衝到遠高於 
 | `telemetry_written_total` | 累計寫入 `Telemetries` 的筆數 |
 | `sensor_readings_written_total` | 累計寫入 `SensorReadings` 的筆數 |
 | `telemetry_failed_total` | 重試 3 次仍失敗（**代表資料已遺失**） |
+| `telemetry_messages_dropped_total` | 重送後仍處理失敗而被丟棄的訊息數（**代表資料已遺失**） |
 | `telemetry_batch_processing_seconds` | 批次寫入耗時（histogram） |
 | `telemetry_worker_healthy` | 🆕 1 = 已連上 MQ 且批次處理在跑 |
 | `telemetry_worker_buffer_depth` | 🆕 已消化但還沒入庫的記憶體緩衝深度 |
@@ -359,6 +361,25 @@ Worker 會重新接上、開始追積壓（消化速率會暫時衝到遠高於 
 ---
 
 ## 10. 疑難排解
+
+### 佇列一直積壓，但消費者數是 1、而且重送數飆高
+
+消費者有接上，訊息也送到了，只是每一則都被 nack 丟回佇列 —— 消費回呼裡有例外。
+特徵是 `rabbitmq_channel_messages_redelivered_total` 的斜率跟發布速率同一個量級，
+而 `telemetry_written_total` 幾乎不動。
+
+```bash
+# 例外會直接印在 backend-api 的 log 裡（訊息編號 + 完整 stack trace）
+docker compose logs backend-api | grep -A6 "Error processing message"
+```
+
+現在同一則訊息最多只會重送一次，第二次仍失敗就丟棄並且
+`telemetry_messages_dropped_total` 加一 —— 佇列不會再被單一則壞訊息卡住，
+但**丟棄就是資料遺失**，看到這個計數器在動一定要追。
+
+> 曾經踩過的坑：`telemetry_worker_buffer_depth` 這個指標在 `/metrics` 裡完全查不到
+> （不是 0，是整個 series 不存在），就是因為設定這個 gauge 的那行自己在丟例外。
+> 指標「不見了」跟「是 0」意義完全不同，排查時要先分清楚。
 
 ### 儀表板全部是「No data」
 

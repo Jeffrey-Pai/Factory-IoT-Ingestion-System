@@ -72,7 +72,18 @@ public sealed class TelemetryIngestionWorker : BackgroundService
     private readonly ILoggerFactory _loggerFactory;
     private readonly Channel<Telemetry> _channel;
     private ITelemetryConsumer? _consumer;
-    
+
+    // Depth of the in-process buffer, counted by hand.
+    //
+    // ChannelReader<T>.Count cannot be used for this: Channel.CreateUnbounded with
+    // SingleReader = true hands back a SingleConsumerUnboundedChannel, whose reader
+    // reports CanCount == false and throws NotSupportedException from Count. Reading it
+    // once per message is what took ingestion down — the throw escaped
+    // OnTelemetryReceivedAsync, so the consumer nacked every message back onto the queue
+    // and the backlog grew forever. Incrementing on write and decrementing on take costs
+    // one interlocked op per message and works on any channel implementation.
+    private long _bufferDepth;
+
     // Health status tracking
     private bool _isConnected;
     private bool _isProcessing;
@@ -244,10 +255,15 @@ public sealed class TelemetryIngestionWorker : BackgroundService
         
         await _channel.Writer.WriteAsync(telemetry);
 
+        // Everything below this line runs after the message has been handed off, and the
+        // consumer acks as soon as this method returns. Anything that throws here would
+        // be nacked and redelivered even though the telemetry is already buffered, so
+        // this tail must stay non-throwing — bookkeeping only, no I/O.
+        //
         // Buffer depth separates "RabbitMQ is backed up because nothing is consuming"
         // from "we are consuming fine but the database can't keep up" — in the second
         // case the queue drains into this in-process buffer instead.
-        WorkerBufferDepthGauge.Set(_channel.Reader.Count);
+        WorkerBufferDepthGauge.Set(Interlocked.Increment(ref _bufferDepth));
     }
 
     private async Task ProcessBatchesAsync(CancellationToken stoppingToken)
@@ -258,10 +274,17 @@ public sealed class TelemetryIngestionWorker : BackgroundService
         _logger.LogInformation("Batch processor running. Batch size: {BatchSize}, Interval: {BatchInterval}s",
             BatchSize, BatchInterval.TotalSeconds);
 
+        // The pending read is owned by this invocation. When the method exits early the
+        // whole pipeline is torn down and restarted, and a read left dangling would still
+        // be registered on the channel — giving the next ProcessBatchesAsync a second
+        // concurrent reader on a channel built with SingleReader = true. Cancelling this
+        // source in the finally retires it instead.
+        using var readerCts = CancellationTokenSource.CreateLinkedTokenSource(stoppingToken);
+
         // Keep a single outstanding read/timer task at a time. PeriodicTimer.WaitForNextTickAsync
         // (and a SingleReader Channel's ReadAsync) must not be invoked again while a previous call
         // is still pending, or it throws/corrupts state - so each is only re-issued after it completes.
-        var readTask = _channel.Reader.ReadAsync(stoppingToken).AsTask();
+        var readTask = _channel.Reader.ReadAsync(readerCts.Token).AsTask();
         var timerTask = batchTimer.WaitForNextTickAsync(stoppingToken).AsTask();
 
         try
@@ -273,13 +296,17 @@ public sealed class TelemetryIngestionWorker : BackgroundService
                 if (completedTask == readTask)
                 {
                     batch.Add(await readTask);
-                    readTask = _channel.Reader.ReadAsync(stoppingToken).AsTask();
+                    Interlocked.Decrement(ref _bufferDepth);
+                    readTask = _channel.Reader.ReadAsync(readerCts.Token).AsTask();
 
                     // Accumulate more items if available (up to batch size)
                     while (batch.Count < BatchSize && _channel.Reader.TryRead(out var item))
                     {
                         batch.Add(item);
+                        Interlocked.Decrement(ref _bufferDepth);
                     }
+
+                    WorkerBufferDepthGauge.Set(Interlocked.Read(ref _bufferDepth));
 
                     // If batch is full, flush immediately
                     if (batch.Count >= BatchSize)
@@ -321,6 +348,29 @@ public sealed class TelemetryIngestionWorker : BackgroundService
             IsProcessing = false;
             throw;
         }
+        finally
+        {
+            // Retire the outstanding read (see readerCts above). If it happens to have
+            // already produced an item we drop it along with the rest of this batch —
+            // losing one message beats leaving a second reader attached to the channel.
+            readerCts.Cancel();
+            try
+            {
+                await readTask;
+
+                // The read had pulled an item off the channel, so drop it from the depth
+                // count as well; everything still buffered stays counted for the pipeline
+                // that restarts after us.
+                Interlocked.Decrement(ref _bufferDepth);
+            }
+            catch
+            {
+                // Expected: the read was cancelled, or it faulted for the same reason we
+                // are unwinding. Nothing here should mask the original failure.
+            }
+
+            WorkerBufferDepthGauge.Set(Interlocked.Read(ref _bufferDepth));
+        }
     }
 
     private async Task FlushBatchAsync(List<Telemetry> batch, CancellationToken cancellationToken)
@@ -355,36 +405,43 @@ public sealed class TelemetryIngestionWorker : BackgroundService
                 await telemetryRepository.AddRangeAsync(batch, cancellationToken);
                 await sensorReadingRepository.AddRangeAsync(sensorReadings, cancellationToken);
                 await transaction.CommitAsync(cancellationToken);
-                stopwatch.Stop();
-
-                TelemetriesWrittenCounter.Inc(batch.Count);
-                SensorReadingsWrittenCounter.Inc(sensorReadings.Count);
-                BatchProcessingHistogram.Observe(stopwatch.Elapsed.TotalSeconds);
-                _lastBatchFlushed = DateTimeOffset.UtcNow;
-                LastFlushTimestampGauge.Set(UnixSecondsNow());
-                WorkerBufferDepthGauge.Set(_channel.Reader.Count);
-
-                _logger.LogInformation("✓ Successfully saved {Count} telemetry records and {SensorReadingCount} sensor readings to MSSQL in {ElapsedMs}ms",
-                    batch.Count, sensorReadings.Count, stopwatch.ElapsedMilliseconds);
-                return; // Success, exit retry loop
             }
             catch (Exception ex)
             {
-                _logger.LogError(ex, "✗ Failed to save batch of {Count} telemetry records (attempt {Attempt}/{MaxRetries})", 
+                _logger.LogError(ex, "✗ Failed to save batch of {Count} telemetry records (attempt {Attempt}/{MaxRetries})",
                     batch.Count, attempt, maxRetries);
-                
+
                 if (attempt >= maxRetries)
                 {
                     stopwatch.Stop();
                     TelemetriesFailedCounter.Inc(batch.Count);
-                    _logger.LogCritical("✗✗✗ CRITICAL: Failed to save batch after {MaxRetries} attempts. DATA LOSS for {Count} records! ✗✗✗", 
+                    _logger.LogCritical("✗✗✗ CRITICAL: Failed to save batch after {MaxRetries} attempts. DATA LOSS for {Count} records! ✗✗✗",
                         maxRetries, batch.Count);
-                    break;
+                    return;
                 }
-                
+
                 // Exponential backoff before retry
                 await Task.Delay(TimeSpan.FromSeconds(Math.Pow(2, attempt)), cancellationToken);
+                continue;
             }
+
+            // ── Committed ────────────────────────────────────────────────────────────
+            // Deliberately outside the try: once CommitAsync returns, the rows are durable
+            // and this batch must never go round the retry loop again. Bookkeeping that
+            // threw in here used to send an already-committed batch back through the
+            // insert, which collided on the primary keys and reported DATA LOSS for
+            // records that were sitting safely in the database.
+            stopwatch.Stop();
+
+            TelemetriesWrittenCounter.Inc(batch.Count);
+            SensorReadingsWrittenCounter.Inc(sensorReadings.Count);
+            BatchProcessingHistogram.Observe(stopwatch.Elapsed.TotalSeconds);
+            _lastBatchFlushed = DateTimeOffset.UtcNow;
+            LastFlushTimestampGauge.Set(UnixSecondsNow());
+
+            _logger.LogInformation("✓ Successfully saved {Count} telemetry records and {SensorReadingCount} sensor readings to MSSQL in {ElapsedMs}ms",
+                batch.Count, sensorReadings.Count, stopwatch.ElapsedMilliseconds);
+            return; // Success, exit retry loop
         }
     }
 
