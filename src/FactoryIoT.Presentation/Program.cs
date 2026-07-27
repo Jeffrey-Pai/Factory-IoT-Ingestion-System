@@ -1,10 +1,12 @@
 using FactoryIoT.Application.Common.Interfaces;
 using FactoryIoT.Application.DTOs;
 using FactoryIoT.Domain.Interfaces;
+using FactoryIoT.Infrastructure.Configuration;
 using FactoryIoT.Infrastructure.Messaging;
 using FactoryIoT.Infrastructure.Persistence;
 using FactoryIoT.Infrastructure.Workers;
 using Microsoft.EntityFrameworkCore;
+using Microsoft.Extensions.Options;
 using Prometheus;
 
 var builder = WebApplication.CreateBuilder(args);
@@ -21,9 +23,15 @@ var connectionString = builder.Configuration.GetConnectionString("Default")
 builder.Services.AddDbContext<FactoryIoTDbContext>(options =>
     options.UseSqlServer(connectionString));
 
+// Storage-tier retention & rollup settings. Bound from the "DataRetention" section, which
+// docker-compose overrides per environment with DataRetention__* variables.
+builder.Services.Configure<DataRetentionOptions>(
+    builder.Configuration.GetSection(DataRetentionOptions.SectionName));
+
 // Register repositories
 builder.Services.AddScoped<ITelemetryRepository, TelemetryRepository>();
 builder.Services.AddScoped<ISensorReadingRepository, SensorReadingRepository>();
+builder.Services.AddScoped<IDataLifecycleRepository, DataLifecycleRepository>();
 
 // Register RabbitMQ connection configuration (host/port/credentials).
 //
@@ -51,6 +59,12 @@ builder.Services.AddSingleton(rabbitConfig);
 // Register background worker as singleton to enable health checks
 builder.Services.AddSingleton<TelemetryIngestionWorker>();
 builder.Services.AddHostedService(sp => sp.GetRequiredService<TelemetryIngestionWorker>());
+
+// Storage lifecycle runs as its own worker rather than inside the ingestion loop: aggregating and
+// purging are bulk operations measured in seconds, and the ingestion path must never wait behind
+// them. Registered as a singleton as well so its state is readable from the API.
+builder.Services.AddSingleton<DataLifecycleWorker>();
+builder.Services.AddHostedService(sp => sp.GetRequiredService<DataLifecycleWorker>());
 
 // If the worker's BackgroundService ever faults, keep the host (and its API/health
 // endpoints) running instead of the default behavior of shutting the whole process down.
@@ -212,6 +226,39 @@ app.MapGet("/api/v1/fleet/status", async (
     return Results.Ok(status);
 })
 .WithName("GetFleetStatus")
+.WithOpenApi();
+
+// ── Storage lifecycle ───────────────────────────────────────────────────────────────────────
+// Operational view of the storage tiers: what each still holds, how far behind aggregation is,
+// and the retention windows in force. This is the endpoint to check when the database is growing
+// unexpectedly — a rollup lag that keeps climbing means purging has correctly stopped itself,
+// because raw rows are never deleted ahead of the aggregation that summarises them.
+app.MapGet("/api/v1/data-lifecycle", async (
+    IDataLifecycleRepository repository,
+    IOptions<DataRetentionOptions> options,
+    DataLifecycleWorker worker) =>
+{
+    var settings = options.Value;
+    var report = await repository.GetReportAsync(settings.ToRetentionWindows());
+
+    return Results.Ok(new
+    {
+        report.GeneratedAt,
+        retentionEnabled = settings.Enabled,
+        lastPassCompleted = worker.LastPassCompleted,
+        lastPassSucceeded = worker.LastPassSucceeded,
+        rawQueryWindowMinutes = settings.RawQueryWindowMinutes,
+        tiers = new object[]
+        {
+            report.RawTelemetry,
+            report.RawSensorReadings,
+            report.MinuteRollups,
+            report.HourRollups,
+        },
+        report.TrackedMachines,
+    });
+})
+.WithName("GetDataLifecycle")
 .WithOpenApi();
 
 app.Run();

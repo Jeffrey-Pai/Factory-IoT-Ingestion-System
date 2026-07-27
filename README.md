@@ -6,8 +6,10 @@
 | 文件 | 內容 | 適合誰 |
 |------|------|--------|
 | 📐 [系統架構 ARCHITECTURE.md](./docs/ARCHITECTURE.md) | 架構圖、資料流、分層設計、技術決策 | 想了解「系統在幹嘛」 |
+| 🗄️ [資料生命週期 DATA-LIFECYCLE.md](./docs/DATA-LIFECYCLE.md) | 冷熱分層、預聚合、保留期、容量規劃與擴充路線 | 擔心「資料越存越多怎麼辦」 |
 | 🛠️ [操作手冊 OPERATIONS.md](./docs/OPERATIONS.md) | 啟動、驗證、監控設定、壓測、故障排除 | 要把系統跑起來、維運 |
 | 👩‍💻 [開發者指南 DEVELOPMENT.md](./docs/DEVELOPMENT.md) | 本機開發、加 API、加 Migration、除錯 | 要改程式碼 |
+| 🚀 [發布流程 RELEASE.md](./docs/RELEASE.md) | 改完程式碼後怎麼重新打包、發布、驗證、回滾 | 改完了要發上去 |
 | ✅ [驗證指南 VERIFICATION_GUIDE.md](./VERIFICATION_GUIDE.md) | RabbitMQ→MSSQL 資料流驗證與診斷 | 排查資料未入庫問題 |
 | 🖥️ [前端儀表板 frontend/README.md](./frontend/README.md) | React 即時監控儀表板:安裝、開發、Docker | 想看資料視覺化畫面 |
 
@@ -17,7 +19,8 @@
 flowchart LR
     SIM["🏭 Simulator<br/>50 台機台<br/>每秒發布遙測"] --> MQ[["🐇 RabbitMQ<br/>telemetry-queue"]]
     MQ --> W["⚙️ Backend Worker<br/>Channel 緩衝 + 批次寫入"]
-    W --> DB[("🗄️ SQL Server")]
+    W --> DB[("🗄️ SQL Server<br/>熱層 / 聚合層")]
+    LIFE["🧹 Lifecycle Worker<br/>預聚合 + 保留期清理"] --> DB
     API["🌐 REST API"] --> DB
     DASH["🖥️ 前端儀表板<br/>React + Vite"] --> API
     PROM["📈 Prometheus"] --> API
@@ -161,7 +164,7 @@ vus............................: 50      min=50  max=50
 - **Backend API** (ASP.NET Core): 提供 REST API 與 Prometheus metrics
 - **Simulator**: 多執行緒模擬 50+ 台設備發送遙測數據
 - **RabbitMQ**: 訊息佇列，處理遙測數據
-- **SQL Server**: 儲存遙測數據
+- **SQL Server**: 分層儲存遙測數據 —— 熱層保留逐筆原始資料數十小時，更久的歷史以每分鐘／每小時的預聚合時間桶保存，資料庫大小因此穩定而非無限成長（見 [DATA-LIFECYCLE.md](./docs/DATA-LIFECYCLE.md)）
 - **Prometheus**: 收集 metrics
 - **Grafana**: 視覺化監控儀表板
 
@@ -177,6 +180,7 @@ vus............................: 50      min=50  max=50
 | GET | `/api/v1/machines` | **機台總覽**：每台一列彙總（樣本數、首/末回報、溫度與壓力 min/max/avg） |
 | GET | `/api/v1/telemetry/{machineId}/stats?windowMinutes=N` | **單機統計**：最近 N 分鐘（預設 60）的聚合；查無資料回 404 |
 | GET | `/api/v1/fleet/status?windowMinutes=N` | **全廠健康快照**：回報機台數、總讀值數、狀態分佈 |
+| GET | `/api/v1/data-lifecycle` | **儲存分層現況**：各層資料範圍、聚合落後秒數、保留期設定 |
 | GET | `/metrics` · `/swagger` | Prometheus 指標 / Swagger UI（僅開發環境） |
 
 > 端點細節、curl 範例與參數限制見 **[操作手冊 OPERATIONS.md](./docs/OPERATIONS.md#api-端點一覽)**；`src/FactoryIoT.Presentation/FactoryIoT.Presentation.http` 可在 IDE 內直接點擊發送。

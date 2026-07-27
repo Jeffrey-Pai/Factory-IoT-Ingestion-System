@@ -2,7 +2,7 @@
 
 本文件說明 **Factory IoT Ingestion System** 的整體架構、資料流、分層設計，以及重要的技術決策，讓你能快速掌握「這個系統在幹嘛、每一塊負責什麼」。
 
-> 📌 想直接動手操作，請看 [操作手冊 OPERATIONS.md](./OPERATIONS.md)；想改程式碼，請看 [開發者指南 DEVELOPMENT.md](./DEVELOPMENT.md)。
+> 📌 想直接動手操作，請看 [操作手冊 OPERATIONS.md](./OPERATIONS.md)；想改程式碼，請看 [開發者指南 DEVELOPMENT.md](./DEVELOPMENT.md)；擔心資料越存越多，請看 [資料生命週期 DATA-LIFECYCLE.md](./DATA-LIFECYCLE.md)。
 
 ---
 
@@ -32,6 +32,7 @@ flowchart LR
 
     subgraph core["⚙️ Backend API（.NET 8）"]
         W["TelemetryIngestionWorker<br/>背景消費 + 批次寫入"]
+        LC["DataLifecycleWorker<br/>預聚合 + 保留期清理"]
         API["REST API<br/>查詢 / 健康檢查 / metrics"]
     end
 
@@ -45,7 +46,8 @@ flowchart LR
     M -- "發布 JSON 遙測" --> MQ
     MQ -- "消費訊息" --> W
     W -- "批次 INSERT" --> DB
-    API -- "查詢最新資料" --> DB
+    LC -- "聚合成時間桶 + 刪除過期資料" --> DB
+    API -- "依視窗寬度選層查詢" --> DB
     PROM -- "每 15s 抓 /metrics" --> API
     GRAF -- "查詢指標" --> PROM
     K6 -- "打 API 壓測" --> API
@@ -159,7 +161,7 @@ flowchart TB
     subgraph INF["FactoryIoT.Infrastructure"]
         direction TB
         MSG["Messaging<br/>RabbitMqConsumer / Publisher / Config"]
-        WRK["Workers<br/>TelemetryIngestionWorker"]
+        WRK["Workers<br/>TelemetryIngestionWorker<br/>DataLifecycleWorker"]
         PER["Persistence<br/>DbContext / Repository / Migrations"]
     end
 
@@ -171,7 +173,7 @@ flowchart TB
 
     subgraph DOM["FactoryIoT.Domain（最核心）"]
         direction TB
-        ENT["Entities<br/>Telemetry / SensorReading"]
+        ENT["Entities<br/>Telemetry / SensorReading<br/>TelemetryRollup / MachineSummary"]
         DIFACE["Interfaces<br/>ITelemetryRepository ..."]
     end
 
@@ -195,9 +197,9 @@ flowchart TB
 
 | 專案 | 角色 | 相依於 | 主要內容 |
 |------|------|--------|----------|
-| **FactoryIoT.Domain** | 核心領域（無任何外部相依） | 無 | 實體 `Telemetry`、`SensorReading`；分析 read-model `MachineTelemetrySummary`／`TelemetryStatistics`／`FleetStatus`（`Analytics/`）；儲存庫介面 `ITelemetryRepository`、`ISensorReadingRepository` |
+| **FactoryIoT.Domain** | 核心領域（無任何外部相依） | 無 | 實體 `Telemetry`、`SensorReading`，以及分層儲存用的 `TelemetryRollup`／`TelemetryStatusRollup`／`MachineSummary`／`RollupCheckpoint` 與桶運算 `RollupBucket`；分析 read-model `MachineTelemetrySummary`／`TelemetryStatistics`／`FleetStatus`／`DataLifecycleReport`（`Analytics/`）；儲存庫介面 `ITelemetryRepository`、`ISensorReadingRepository`、`IDataLifecycleRepository` |
 | **FactoryIoT.Application** | 應用契約 / 使用案例邊界 | Domain | 資料傳輸物件 `SensorReadingDto`；訊息介面 `ITelemetryConsumer`、`IMessagePublisher` |
-| **FactoryIoT.Infrastructure** | 外部技術實作 | Domain、Application | RabbitMQ 消費/發布、`TelemetryIngestionWorker`、EF Core `DbContext` 與 Repository、Migrations |
+| **FactoryIoT.Infrastructure** | 外部技術實作 | Domain、Application | RabbitMQ 消費/發布、`TelemetryIngestionWorker`、`DataLifecycleWorker`、EF Core `DbContext` 與 Repository、Migrations、保留期設定 `DataRetentionOptions` |
 | **FactoryIoT.Presentation** | 對外入口（Web API） | Application、Infrastructure | `Program.cs`（Minimal API 端點、DI 註冊、啟動時跑 Migration） |
 | **FactoryIoT.Simulator** | 資料產生器（獨立程式） | Domain | 模擬 50 台機台發布遙測 |
 
@@ -239,32 +241,95 @@ stateDiagram-v2
 
 ## 7. 資料模型（Database Schema）
 
-資料庫 `factory_iot` 由 EF Core Migration（`InitialCreate`）建立兩張表：
+資料庫 `factory_iot` 的 schema 分成**四層**，而不是兩張只進不出的表。完整的設計理由、容量試算與調校方式見 **[DATA-LIFECYCLE.md](./DATA-LIFECYCLE.md)**；這裡只講結構。
 
 ```mermaid
 erDiagram
     Telemetries {
+        datetimeoffset Timestamp PK "叢集鍵前導"
         uniqueidentifier Id PK
-        nvarchar(50) MachineId "必填，索引"
+        nvarchar(50) MachineId "涵蓋索引"
         float Temperature
         float Pressure
-        nvarchar(50) Status "必填"
-        datetimeoffset Timestamp "必填，索引"
+        nvarchar(50) Status
     }
     SensorReadings {
+        datetimeoffset Timestamp PK "叢集鍵前導"
         uniqueidentifier Id PK
-        nvarchar(50) MachineId "必填，索引"
-        nvarchar(50) SensorType "必填"
+        nvarchar(50) MachineId "涵蓋索引"
+        nvarchar(50) SensorType
         float Value
-        nvarchar(20) Unit "必填"
-        datetimeoffset Timestamp "必填，索引"
+        nvarchar(20) Unit
     }
+    TelemetryRollups {
+        int Granularity PK "1=分鐘 2=小時"
+        nvarchar(50) MachineId PK
+        datetimeoffset BucketStart PK
+        int SampleCount
+        float SumTemperature "存總和而非平均"
+        float MinTemperature
+        float MaxTemperature
+        float SumPressure
+        float MinPressure
+        float MaxPressure
+        datetimeoffset FirstReading
+        datetimeoffset LastReading
+    }
+    TelemetryStatusRollups {
+        int Granularity PK
+        datetimeoffset BucketStart PK
+        nvarchar(50) MachineId PK
+        nvarchar(50) Status PK
+        int Count
+    }
+    MachineSummaries {
+        nvarchar(50) MachineId PK
+        bigint SampleCount "終身累計"
+        datetimeoffset FirstSeen
+        datetimeoffset LastSeen
+        float SumTemperature
+        float MinTemperature
+        float MaxTemperature
+        float SumPressure
+        float MinPressure
+        float MaxPressure
+    }
+    RollupCheckpoints {
+        int Granularity PK
+        datetimeoffset LastCompletedBucketStart "聚合浮水印"
+    }
+
+    Telemetries ||--o{ TelemetryRollups : "每分鐘聚合"
+    TelemetryRollups ||--o{ TelemetryStatusRollups : "同一個桶"
+    Telemetries ||--o{ MachineSummaries : "累加"
 ```
 
-- 兩張表都在 `(MachineId, Timestamp)` 上建立**複合索引**，正好對應「查某台機台最新 N 筆（依時間倒序）」的查詢模式。
-- **兩張表現在都會即時寫入**：Worker 每次批次落庫時，會把每筆寬表 `Telemetry`（溫度、壓力）拆解成正規化的 `SensorReading`（每個感測器一列），在**同一個交易**裡同時寫進 `Telemetries` 與 `SensorReadings`，兩表資料因此保持一致（見下方「架構備註」）。
-  - `Telemetries`：一台機台某一瞬間的**寬表快照**（一列含所有指標）。
-  - `SensorReadings`：**正規化的每感測器時序**，可回答寬表答不了的問題，例如「給我 EQP-001 最近 20 筆壓力讀值」，且新增感測器類型時免改 schema。
+### 熱層（`Telemetries` / `SensorReadings`）
+
+逐筆原始資料，只保留數十小時。**兩張表現在都會即時寫入**：Worker 每次批次落庫時，把每筆寬表 `Telemetry`（溫度、壓力）拆解成正規化的 `SensorReading`（每個感測器一列），在**同一個交易**裡同時寫進兩張表。
+
+- `Telemetries`：一台機台某一瞬間的**寬表快照**（一列含所有指標）。
+- `SensorReadings`：**正規化的每感測器時序**，可回答寬表答不了的問題（例如「給我 EQP-001 最近 20 筆壓力讀值」），且新增感測器類型時免改 schema。因為它完全可以從寬表重建，預設保留期比 `Telemetries` 更短。
+
+兩張表的**叢集鍵都是 `(Timestamp, Id)`**，不是 `Id`。這是刻意的：SQL Server 的主鍵預設就是叢集索引，也就是資料的實體排列順序，而隨機 GUID 會把每一筆寫入丟到資料表的隨機位置 —— 頁面分裂、填充率掉到七成、緩衝池被打散，而且**隨資料量持續惡化**。以時間為前導欄位讓寫入變成尾端追加，也讓「聚合某一分鐘」和「清掉 N 天前」都變成連續的範圍操作。
+
+「某台機台最新 N 筆」則由 `(MachineId, Timestamp DESC) INCLUDE (…)` 的**涵蓋索引**處理，查詢完全在索引葉層完成，不用回主表查找。兩者都套用 `DATA_COMPRESSION = PAGE`。
+
+### 聚合層（`TelemetryRollups` / `TelemetryStatusRollups`）
+
+每機台每分鐘（保留 30 天）與每機台每小時（保留 2 年）的預聚合時間桶，把長時間視窗的查詢成本壓到 1/60～1/3600。
+
+**存的是 `Sum` 而不是 `Avg`** —— 平均值不能再聚合（除非每個桶筆數相同），總和可以。小時桶因此是分鐘桶的精確 sum-of-sums，讀取時才除出平均。
+
+狀態分佈拆成獨立的窄表，因為狀態是開放式字串，塞進固定欄位會變成「每加一種狀態改一次 schema」。
+
+### 名冊層（`MachineSummaries`）
+
+每台機台一列的**終身**累計，由 lifecycle worker 在每個分鐘桶完成時往前累加。`/api/v1/machines` 讀它而不是重算全表 `GROUP BY`，所以成本固定 50 列、不隨歷史長度成長。統計不受保留期影響 —— 原始資料清掉後，`MaxTemperature` 仍是這台機台史上最高溫。
+
+**但名冊只到「最後一個封閉的分鐘桶」為止。** 這是預聚合換來固定成本的必然代價：桶要等 `RollupLagSeconds` 過後才算封閉，所以名冊的 `LastSeen` 結構性地落後現在 2～3 分鐘。對「這台機台跑得如何」沒差，對「這台機台現在還活著嗎」是錯的 —— 而後者正是前端拿 `LastSeen` 點燈號用的。
+
+所以 `/api/v1/machines` **同時讀兩層**：名冊負責長歷史，再疊上聚合浮水印之後的原始列補足最近幾分鐘。疊加的寬度是聚合工作自己的落後量（而不是資料庫的年齡），所以查詢依然有界；`DataRetention__RosterTailMinutes` 只是聚合停擺／關閉時的安全上限。細節見 [DATA-LIFECYCLE.md](./DATA-LIFECYCLE.md#machinesummaries把成長無上限的查詢變成固定成本)。
 
 ---
 
@@ -279,10 +344,19 @@ erDiagram
 | `sensor_readings_written_total` | Counter | 成功寫入 `SensorReadings` 的正規化讀值總數（每筆 Telemetry 拆成多筆） |
 | `telemetry_failed_total` | Counter | 重試後仍寫入失敗（資料遺失）的記錄總數 |
 | `telemetry_batch_processing_seconds` | Histogram | 每批次寫入耗時分布 |
+| `telemetry_channel_depth` | Gauge | 記憶體緩衝中待寫入的訊息數 |
+| `telemetry_rollup_lag_seconds` | Gauge | 聚合落後現在多少秒（依 granularity 分標籤） |
+| `telemetry_rollup_buckets_total` | Counter | 已建立的預聚合時間桶數 |
+| `telemetry_rollup_rows_total` | Counter | 已寫入的聚合列數 |
+| `telemetry_rows_purged_total` | Counter | 保留期清理掉的列數（依 tier 分標籤） |
 
 此外 `app.UseHttpMetrics()` 會自動產生標準的 HTTP 指標（`http_request_duration_seconds`、`http_requests_received_total` 等）。
 
-**健康的系統應該滿足：** `rate(telemetry_consumed_total)` ≈ `rate(telemetry_written_total)`，且 `telemetry_failed_total` 保持為 0。
+**健康的系統應該滿足：**
+
+- `rate(telemetry_consumed_total)` ≈ `rate(telemetry_written_total)`，且 `telemetry_failed_total` 保持為 0
+- `telemetry_channel_depth` 貼近 0 —— 持續偏高代表資料庫寫入跟不上
+- `telemetry_rollup_lag_seconds{granularity="Minute"}` 穩定在 120～180 秒之間（安全邊際 + 最多一個桶寬）—— **持續往上爬**代表聚合跟不上攝取，此時保留期清理會自動停止（絕不刪掉還沒被聚合的原始資料），資料庫開始長大
 
 ---
 
@@ -314,6 +388,10 @@ erDiagram
 | **自我修復管線** | 讓 Worker 能從短暫的 broker / DB 故障中自動復原，不需要人工重啟容器。 |
 | **啟動時自動 Migration** | `Program.cs` 開機即 `MigrateAsync()`，容器起來資料表就緒，零手動步驟。 |
 | **環境變數優先於設定檔** | `RABBITMQ_*` 環境變數優先於 `appsettings.json`，讓 docker-compose 能覆寫連線目標（見下）。 |
+| **有界 Channel + 背壓** | 無界緩衝在資料庫變慢時會一路長到 OOM，而且被 kill 時堆在裡面的資料全沒。改成有界後，滿了會卡住 consumer callback（在 ack 之前），未確認訊息累積到 prefetch 上限、broker 停止推送，backlog 留在**持久化的 RabbitMQ**裡等 —— 這才是「用 MQ 當緩衝」原本要的行為。 |
+| **儲存分層而非單純冷熱搬家** | 時序資料的槓桿在「降解析度」而不是「換位置放」：把逐筆資料搬到另一張同結構的冷表，總量一點沒少、儀表板查詢一樣慢，還多付一次讀寫。改成短保留期的熱層 + 預聚合的溫／冷層，資料庫大小才會**穩定**而不是無限成長。 |
+| **時間為前導的叢集鍵** | 隨機 GUID 當叢集鍵會讓寫入散佈全表，且隨資料量持續惡化。`(Timestamp, Id)` 讓寫入變尾端追加，同時讓聚合與清理都變成連續範圍操作。 |
+| **聚合與清理獨立成一個 Worker** | 聚合、清理是以秒計的批次操作；攝取是對延遲敏感的迴圈。分開跑讓兩者互不阻塞，其中一邊失敗也不會拖垮另一邊。 |
 
 ### ⚠️ 一個曾經踩過的雷：RabbitMQ 主機解析
 
@@ -330,7 +408,11 @@ erDiagram
 
 Worker 落庫時透過 `SensorReading.FromTelemetry(...)` 把每筆寬表快照拆成正規化讀值（`Temperature`／`Pressure`），對外再由 `GET /api/v1/sensors/{machineId}/readings?sensorType=&count=` 讀回（回應型別為 `SensorReadingDto`）。因此 `SensorReading` 實體、`ISensorReadingRepository`、`SensorReadingRepository`、`SensorReadingDto`、`SensorReadings` 表**現在全都在執行路徑上**。
 
-✅ **監控／分析查詢（read 端）：** `GET /api/v1/machines`、`GET /api/v1/telemetry/{machineId}/stats` 與 `GET /api/v1/fleet/status` 把「機台總覽、單機時間窗統計、全廠健康快照」下推到 SQL Server 以 `GROUP BY` 聚合，回傳 `FactoryIoT.Domain.Analytics` 下的 read-model record（`MachineTelemetrySummary`／`TelemetryStatistics`／`FleetStatus`）。這條 read 路徑只讀 `Telemetries` 表、不參與寫入，因此不影響上面的落庫管線。
+✅ **儲存生命週期管線（`DataLifecycleWorker`）：** 每 30 秒把已封閉的分鐘桶從 `Telemetries` 聚合進 `TelemetryRollups`／`TelemetryStatusRollups`、累加進 `MachineSummaries`、前進 `RollupCheckpoints`（四者在**同一個交易**內），接著把分鐘桶再聚合成小時桶，最後依保留期分批刪除各層過期資料。清理的 cutoff 永遠被聚合進度夾住 —— 聚合停擺時清理跟著停擺，寧可讓資料庫長大也不刪掉還沒被聚合的原始資料。
+
+✅ **監控／分析查詢（read 端）：** `GET /api/v1/machines`、`GET /api/v1/telemetry/{machineId}/stats` 與 `GET /api/v1/fleet/status` 回傳 `FactoryIoT.Domain.Analytics` 下的 read-model record（`MachineTelemetrySummary`／`TelemetryStatistics`／`FleetStatus`）。這條 read 路徑**依視窗寬度自動選層**：3 小時以內讀 `Telemetries` 原始列、更寬的視窗讀預聚合時間桶、機台總覽直接讀 `MachineSummaries`。聚合一律下推到 SQL Server 以 `GROUP BY` 完成，API 不會為了統計把原始資料整批撈回記憶體；整條 read 路徑不參與寫入，因此不影響上面的落庫管線。
+
+✅ **`GET /api/v1/data-lifecycle`：** 回報各層目前保有的資料範圍、聚合浮水印與落後秒數、生效中的保留期。刻意不對熱層做 `COUNT(*)`（那正是這套設計要消滅的存取模式）。
 
 🚧 **仍未接上的骨架程式碼：**
 
@@ -347,6 +429,8 @@ Worker 落庫時透過 `SensorReading.FromTelemetry(...)` 把每筆寬表快照�
 
 ## 12. 延伸閱讀
 
+- 🗄️ [資料生命週期 DATA-LIFECYCLE.md](./DATA-LIFECYCLE.md) — 冷熱分層、預聚合、保留期、容量規劃與流量成長時的擴充路線
 - 🛠️ [操作手冊 OPERATIONS.md](./OPERATIONS.md) — 啟動、驗證、監控設定、壓測、故障排除
 - 👩‍💻 [開發者指南 DEVELOPMENT.md](./DEVELOPMENT.md) — 本機開發、加 API、加 Migration、除錯
+- 🚀 [發布流程 RELEASE.md](./RELEASE.md) — 改完程式碼後怎麼重新打包、發布、驗證、回滾
 - 📄 [根目錄 README.md](../README.md) — 快速開始

@@ -96,10 +96,15 @@ docker compose ps
 | GET | `/api/v1/machines` | **機台總覽**：每台機台一列彙總（樣本數、首/末回報時間、溫度與壓力的 min/max/avg），依機台代號排序 |
 | GET | `/api/v1/telemetry/{machineId}/stats?windowMinutes=N` | **單機統計**：某台機台在最近 N 分鐘（預設 60）的聚合統計；該窗內查無資料回 **404** |
 | GET | `/api/v1/fleet/status?windowMinutes=N` | **全廠健康快照**：最近 N 分鐘（預設 60）有幾台在回報、總讀值數、依狀態（Running／Warning…）分佈 |
+| GET | `/api/v1/data-lifecycle` | **儲存分層現況**：各層保有的資料範圍、聚合浮水印與落後秒數、生效中的保留期設定 |
 | GET | `/metrics` | Prometheus 指標 |
 | GET | `/swagger` | Swagger UI（僅開發環境） |
 
 > `windowMinutes` 需為 1–43200（上限 30 天）；超出範圍回 **400**。分析端點的聚合全部在 SQL Server 端以 `GROUP BY` 完成，API 不會為了統計把原始資料整批撈回記憶體。
+
+> **關於資料新鮮度**：`stats` 與 `fleet/status` 會依視窗寬度自動選擇儲存層。**3 小時以內**的視窗讀原始逐筆資料（秒級即時）；更寬的視窗讀預先聚合的時間桶，**會落後 1～2 分鐘**，換來的是掃描量降到 1/60。原始資料只保留數十小時，更久以前的歷史只剩聚合值。完整說明見 [DATA-LIFECYCLE.md](./DATA-LIFECYCLE.md)。
+>
+> `machines` 是例外：它同時讀名冊層與尚未聚合的原始列，所以 `lastSeen` 是**秒級即時**的，可以直接拿來當機台存活判斷（前端的即時燈號就是用它）。
 
 ---
 
@@ -242,8 +247,13 @@ docker compose start simulator
 | 批次寫入 P95 延遲 | `histogram_quantile(0.95, rate(telemetry_batch_processing_seconds_bucket[5m]))` |
 | API 請求速率 | `rate(http_requests_received_total[1m])` |
 | API P95 延遲 | `histogram_quantile(0.95, rate(http_request_duration_seconds_bucket[5m]))` |
+| 記憶體緩衝深度 | `telemetry_channel_depth` |
+| 聚合落後秒數 | `telemetry_rollup_lag_seconds` |
+| 保留期清理速率（列/秒） | `rate(telemetry_rows_purged_total[5m])` |
 
 > 健康的系統：消費速率 ≈ 寫入速率（在 50 台機台 × 每秒 1 筆的情境下，約 50 筆/秒），失敗速率恆為 0。
+>
+> 另外兩條值得設告警：`telemetry_channel_depth` 持續偏高代表資料庫寫入跟不上；`telemetry_rollup_lag_seconds{granularity="Minute"}` 持續攀升（正常在 120～180 秒）代表聚合跟不上攝取 —— 此時保留期清理會自動停止以免刪掉還沒被聚合的原始資料，資料庫會開始長大。見 [DATA-LIFECYCLE.md](./DATA-LIFECYCLE.md)。
 
 ---
 
@@ -404,6 +414,7 @@ docker compose down -v
 | 批次觸發間隔 | 2 秒 | `TelemetryIngestionWorker` — `BatchInterval` |
 | 寫入失敗重試 | 3 次（指數退避） | `TelemetryIngestionWorker.FlushBatchAsync` |
 | 管線重啟延遲 | 5 秒 | `TelemetryIngestionWorker` — `PipelineRestartDelay` |
+| 記憶體 Channel 容量 | 20,000 筆（滿了對 broker 施加背壓） | `TelemetryIngestionWorker` — `ChannelCapacity` |
 | RabbitMQ prefetch | 500 | `RabbitMqTelemetryConsumer` — `PrefetchCount` |
 | 佇列名稱 | `telemetry-queue`（durable） | `RabbitMqTelemetryConsumer` / `Simulator` |
 | Prometheus 抓取間隔 | 15 秒 | `prometheus.yml` |
@@ -419,3 +430,24 @@ docker compose down -v
 | `ASPNETCORE_ENVIRONMENT` | `Production` | 設 `Development` 可開啟 Swagger |
 
 > 這些環境變數**優先於** `appsettings.json`，是在不改程式碼的情況下調整連線目標的正確方式。
+
+### 儲存分層與保留期（`DataRetention` 區段）
+
+改完重啟即生效，**不需要 migration**。完整說明與容量試算見 [DATA-LIFECYCLE.md](./DATA-LIFECYCLE.md)。
+
+| 環境變數 | 預設 | 說明 |
+|----------|------|------|
+| `DataRetention__Enabled` | `true` | 關掉就不再聚合也不再清理，資料庫會無限成長 |
+| `DataRetention__RawTelemetryHours` | `72` | `Telemetries` 逐筆原始資料保留時數 |
+| `DataRetention__RawSensorReadingHours` | `24` | `SensorReadings` 保留時數（可從寬表重建，故較短） |
+| `DataRetention__MinuteRollupHours` | `720` | 每分鐘聚合桶保留時數（30 天） |
+| `DataRetention__HourRollupHours` | `17520` | 每小時聚合桶保留時數（2 年） |
+| `DataRetention__RawQueryWindowMinutes` | `180` | 視窗在此之內讀原始資料，超過則讀聚合桶 |
+| `DataRetention__RosterTailMinutes` | `15` | `/api/v1/machines` 疊加「尚未聚合的原始列」時最多回看多久。名冊本身落後 2～3 分鐘，這層疊加才讓 `LastSeen`／即時燈號是真的即時。**只是安全上限**：聚合正常時完全不會生效，聚合停擺時它讓查詢維持有界（代價是總計會少算） |
+| `DataRetention__RollupIntervalSeconds` | `30` | 聚合／清理的執行間隔 |
+| `DataRetention__RollupLagSeconds` | `120` | 時間桶封閉後要再等多久才聚合（等在途資料落地） |
+| `DataRetention__MaxBucketsPerPass` | `240` | 每輪最多聚合幾個桶（追進度用的節流） |
+| `DataRetention__PurgeBatchSize` | `5000` | 每次 `DELETE` 的列數 |
+| `DataRetention__MaxPurgeBatchesPerPass` | `40` | 每輪每張表最多刪幾批 |
+
+> **縮短**保留期會在下一輪立刻開始刪資料；**拉長**只影響之後的資料，已刪掉的救不回來。

@@ -35,10 +35,30 @@ export function statusMeta(status: string): StatusMeta {
 /** A machine is "live" if its most recent reading is within the threshold. */
 export type Freshness = "live" | "stale";
 
+/**
+ * Slack for the ingestion path: the worker batches writes on a 2-second timer, and the
+ * broker, the batch and the request itself each add a little. A reading is queryable a
+ * few seconds after the machine sent it, never instantly.
+ */
+export const INGESTION_SLACK_MS = 30_000;
+
+/**
+ * How old a reading may be before the machine reads as stale, given how often we poll.
+ *
+ * The poll interval has to be part of this. Data is at its oldest in the instant before
+ * the next refresh lands, so a threshold that ignores the cadence makes every machine
+ * flicker grey just before each poll at the slower settings — a fleet reporting once a
+ * second, drawn as if it had stopped. A paused dashboard adds nothing: it isn't fetching,
+ * so it genuinely cannot vouch for anything beyond the ingestion slack.
+ */
+export function liveThresholdMs(refetchIntervalMs: number | false): number {
+  return INGESTION_SLACK_MS + (refetchIntervalMs === false ? 0 : refetchIntervalMs);
+}
+
 export function freshness(
   lastSeenIso: string,
   now: number = Date.now(),
-  thresholdMs = 30_000
+  thresholdMs: number = INGESTION_SLACK_MS
 ): Freshness {
   return now - new Date(lastSeenIso).getTime() <= thresholdMs ? "live" : "stale";
 }

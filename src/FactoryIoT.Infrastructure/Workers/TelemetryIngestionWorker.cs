@@ -20,6 +20,12 @@ namespace FactoryIoT.Infrastructure.Workers;
 public sealed class TelemetryIngestionWorker : BackgroundService
 {
     private const int BatchSize = 100;
+
+    // Ceiling on messages buffered in memory between RabbitMQ and the database. Roughly six
+    // minutes of headroom at the shipped rate — enough to ride out a slow batch or a brief
+    // database stall without anything reaching the writer's retry path.
+    private const int ChannelCapacity = 20_000;
+
     private static readonly TimeSpan BatchInterval = TimeSpan.FromSeconds(2);
     private static readonly TimeSpan PipelineRestartDelay = TimeSpan.FromSeconds(5);
 
@@ -42,6 +48,10 @@ public sealed class TelemetryIngestionWorker : BackgroundService
     private static readonly Histogram BatchProcessingHistogram = Metrics.CreateHistogram(
         "telemetry_batch_processing_seconds",
         "Time taken to process and insert a batch of telemetry records");
+
+    private static readonly Gauge ChannelDepthGauge = Metrics.CreateGauge(
+        "telemetry_channel_depth",
+        "Telemetry messages currently buffered in memory awaiting a database write");
 
     private readonly RabbitMqConfig _rabbitConfig;
     private readonly IServiceScopeFactory _scopeFactory;
@@ -70,10 +80,16 @@ public sealed class TelemetryIngestionWorker : BackgroundService
         _scopeFactory = scopeFactory;
         _logger = logger;
         _loggerFactory = loggerFactory;
-        _channel = Channel.CreateUnbounded<Telemetry>(new UnboundedChannelOptions
+        // Bounded, and waiting when full, so that a database that cannot keep up becomes
+        // backpressure rather than heap growth. The wait blocks the consumer callback before it
+        // acknowledges, so unacknowledged messages accumulate against the prefetch window, the
+        // broker stops pushing, and the backlog waits in RabbitMQ — which is durable — instead of
+        // in a process that will be OOM-killed along with everything it was holding.
+        _channel = Channel.CreateBounded<Telemetry>(new BoundedChannelOptions(ChannelCapacity)
         {
             SingleReader = true,
-            SingleWriter = false
+            SingleWriter = false,
+            FullMode = BoundedChannelFullMode.Wait,
         });
     }
 
@@ -215,6 +231,8 @@ public sealed class TelemetryIngestionWorker : BackgroundService
             while (!stoppingToken.IsCancellationRequested)
             {
                 var completedTask = await Task.WhenAny(readTask, timerTask);
+
+                ChannelDepthGauge.Set(_channel.Reader.Count);
 
                 if (completedTask == readTask)
                 {

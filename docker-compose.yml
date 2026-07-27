@@ -101,6 +101,21 @@ services:
       RABBITMQ_USER: guest
       RABBITMQ_PASS: guest
       ConnectionStrings__Default: "Server=mssql,1433;Database=factory_iot;User Id=sa;Password=IoT_Secret123!;TrustServerCertificate=True"
+      # ── Storage tiers ──────────────────────────────────────────────────────
+      # Raw readings are kept briefly; everything older is served from
+      # pre-aggregated buckets. Without this the database grows ~1.7 GB/day at
+      # the shipped rate and hits SQL Server Express's hard 10 GB per-database
+      # ceiling inside a week. Sizing and trade-offs: docs/DATA-LIFECYCLE.md.
+      DataRetention__RawTelemetryHours: "72"
+      DataRetention__RawSensorReadingHours: "24"
+      DataRetention__MinuteRollupHours: "720"
+      DataRetention__HourRollupHours: "17520"
+      # How far back /api/v1/machines may look for readings not yet aggregated.
+      # The roster is only as fresh as the last closed bucket, so without this
+      # overlay every machine reports "last seen 3 minutes ago" and the
+      # dashboard draws a healthy fleet as stale. Only a safety clamp: it binds
+      # solely when aggregation has stalled or is switched off.
+      DataRetention__RosterTailMinutes: "15"
     depends_on:
       rabbitmq:
         condition: service_healthy

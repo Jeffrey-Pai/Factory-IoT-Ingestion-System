@@ -7,10 +7,15 @@ namespace FactoryIoT.Domain.Analytics;
 /// </summary>
 public sealed record FleetStatus(
     int MachineCount,
-    int TotalReadings,
+    long TotalReadings,
     IReadOnlyList<StatusBreakdown> Breakdown);
 
 /// <summary>
 /// The number of readings observed for one distinct <see cref="Status"/> value within the window.
 /// </summary>
-public sealed record StatusBreakdown(string Status, int Count);
+/// <remarks>
+/// 64-bit because the window can span the whole retained history: fifty machines reporting once a
+/// second overflow a 32-bit count after roughly sixteen months, and the sum is taken over
+/// pre-aggregated buckets whose per-bucket counts are already in the thousands.
+/// </remarks>
+public sealed record StatusBreakdown(string Status, long Count);
