@@ -18,6 +18,9 @@
     <!-- Pinned to the same EF Core version Infrastructure uses (8.0.4) so the two never diverge.
          The in-memory provider lets the repository's real LINQ run without a live SQL Server. -->
     <PackageReference Include="Microsoft.EntityFrameworkCore.InMemory" Version="8.0.4" />
+    <!-- IDistributedCache, so the cache tests can stand in a fake store (in-memory / throwing)
+         without a live Redis. Matches the version Infrastructure pulls in transitively. -->
+    <PackageReference Include="Microsoft.Extensions.Caching.Abstractions" Version="8.0.0" />
   </ItemGroup>
 
   <ItemGroup>
