@@ -407,13 +407,13 @@ CREATE CLUSTERED COLUMNSTORE INDEX CCI_TelemetryRollups
 | `telemetry_rollup_buckets_total{granularity}` | Counter | 已建立的桶數 |
 | `telemetry_rollup_rows_total{granularity}` | Counter | 已寫入的聚合列數 |
 | `telemetry_rows_purged_total{tier}` | Counter | 各層清理掉的列數 |
-| `telemetry_channel_depth` | Gauge | 記憶體緩衝中待寫入的訊息數 |
+| `telemetry_worker_buffer_depth` | Gauge | 記憶體緩衝中待寫入的訊息數 |
 
 **健康的系統：**
 
 - `telemetry_rollup_lag_seconds{granularity="Minute"}` 穩定在 **120～180 秒**之間（= 120 秒安全邊際 + 最多一個桶寬；Prometheus 剛好在兩輪之間抓到時，最多再多一個排程間隔）。**持續往上爬 = 聚合跟不上攝取**，此時清理已自動停止，資料庫會開始長大。
 - `telemetry_rows_purged_total` 穩定成長 = 保留期有在生效。**一直是 0** 表示還沒有資料老到需要清（前 72 小時正常），或者 worker 沒在跑。
-- `telemetry_channel_depth` 應該貼近 0。**持續偏高 = 資料庫寫入跟不上**。
+- `telemetry_worker_buffer_depth` 應該貼近 0。**持續偏高 = 資料庫寫入跟不上**。
 
 ### 直接查狀態
 

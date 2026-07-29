@@ -1,0 +1,675 @@
+# 告警規則:MQ 佇列積壓
+#
+# 由 Grafana 的 alerting provisioning 自動載入 —— 開機就存在,不必在 UI 裡建。
+# Provisioning 進來的規則在 UI 上是**唯讀**的,要調整就改這個檔案再
+# `docker compose restart grafana`。
+#
+# ── 怎麼調門檻 ───────────────────────────────────────────────────────────────
+# 每條規則的 data 都是固定的三段:
+#   A = PromQL 查詢(instant)   B = 取最後一個值   C = 比門檻
+# 所以「門檻」永遠在該規則 data 陣列最後一段(refId: C)的
+#   conditions[0].evaluator.params[0]
+# 「要撐多久才真的燒起來」則是規則層級的 `for`。
+# 各規則的門檻與理由整理在 docs/MONITORING.md。
+#
+# ── noDataState 的取捨 ───────────────────────────────────────────────────────
+# 大部分規則設 OK:指標消失(例如服務整個掛掉)時不重複燒同一件事,
+# 改由 fiot-rabbitmq-down / fiot-backend-down 這兩條(noDataState: Alerting)兜底,
+# 避免一次故障同時噴出十幾封通知。
+apiVersion: 1
+
+groups:
+- orgId: 1
+  name: mq-backlog
+  folder: Factory IoT
+  interval: 1m
+  rules:
+  - uid: fiot-backlog-warning
+    title: MQ 積壓警戒｜待處理訊息偏高
+    condition: C
+    data:
+    - refId: A
+      relativeTimeRange:
+        from: 600
+        to: 0
+      datasourceUid: factory-iot-prometheus
+      model:
+        datasource:
+          type: prometheus
+          uid: factory-iot-prometheus
+        editorMode: code
+        expr: sum(rabbitmq_queue_messages_ready{queue="telemetry-queue"})
+        instant: true
+        range: false
+        intervalMs: 1000
+        maxDataPoints: 43200
+        legendFormat: __auto
+        refId: A
+    - refId: B
+      relativeTimeRange:
+        from: 600
+        to: 0
+      datasourceUid: __expr__
+      model:
+        datasource:
+          type: __expr__
+          uid: __expr__
+        conditions:
+        - evaluator:
+            params: []
+            type: gt
+          operator:
+            type: and
+          query:
+            params:
+            - B
+          reducer:
+            params: []
+            type: last
+          type: query
+        expression: A
+        reducer: last
+        type: reduce
+        intervalMs: 1000
+        maxDataPoints: 43200
+        refId: B
+    - refId: C
+      relativeTimeRange:
+        from: 600
+        to: 0
+      datasourceUid: __expr__
+      model:
+        datasource:
+          type: __expr__
+          uid: __expr__
+        conditions:
+        - evaluator:
+            params:
+            - 1000
+            type: gt
+          operator:
+            type: and
+          query:
+            params:
+            - C
+          reducer:
+            params: []
+            type: last
+          type: query
+        expression: B
+        type: threshold
+        intervalMs: 1000
+        maxDataPoints: 43200
+        refId: C
+    noDataState: OK
+    execErrState: Error
+    for: 5m
+    annotations:
+      summary: telemetry-queue 待處理訊息持續超過 1000 筆
+      description: 佇列裡等著被消化的訊息(Ready)已經連續 5 分鐘超過 1000 筆。以模擬器 50 台機台 × 每秒 1 筆計算,約等於積了 20 秒的產量還沒清掉。目前值:{{
+        $values.B.Value }} 筆。
+      runbook: 1) 先看『佇列沒有任何消費者』有沒有一起燒 → 有的話是 Worker 沒接上。2) curl http://localhost:8080/health/worker 看
+        isHealthy。3) 看儀表板〈發布 vs 消化 vs 入庫〉三條線是不是分岔 —— 分岔點就是瓶頸所在。4) 若消化正常但入庫慢,看〈批次寫入延遲〉,通常是 SQL Server 撐不住。
+    labels:
+      service: factory-iot
+      severity: warning
+      component: rabbitmq
+      queue: telemetry-queue
+    isPaused: false
+  - uid: fiot-backlog-critical
+    title: MQ 積壓嚴重｜待處理訊息暴增
+    condition: C
+    data:
+    - refId: A
+      relativeTimeRange:
+        from: 600
+        to: 0
+      datasourceUid: factory-iot-prometheus
+      model:
+        datasource:
+          type: prometheus
+          uid: factory-iot-prometheus
+        editorMode: code
+        expr: sum(rabbitmq_queue_messages_ready{queue="telemetry-queue"})
+        instant: true
+        range: false
+        intervalMs: 1000
+        maxDataPoints: 43200
+        legendFormat: __auto
+        refId: A
+    - refId: B
+      relativeTimeRange:
+        from: 600
+        to: 0
+      datasourceUid: __expr__
+      model:
+        datasource:
+          type: __expr__
+          uid: __expr__
+        conditions:
+        - evaluator:
+            params: []
+            type: gt
+          operator:
+            type: and
+          query:
+            params:
+            - B
+          reducer:
+            params: []
+            type: last
+          type: query
+        expression: A
+        reducer: last
+        type: reduce
+        intervalMs: 1000
+        maxDataPoints: 43200
+        refId: B
+    - refId: C
+      relativeTimeRange:
+        from: 600
+        to: 0
+      datasourceUid: __expr__
+      model:
+        datasource:
+          type: __expr__
+          uid: __expr__
+        conditions:
+        - evaluator:
+            params:
+            - 10000
+            type: gt
+          operator:
+            type: and
+          query:
+            params:
+            - C
+          reducer:
+            params: []
+            type: last
+          type: query
+        expression: B
+        type: threshold
+        intervalMs: 1000
+        maxDataPoints: 43200
+        refId: C
+    noDataState: OK
+    execErrState: Error
+    for: 5m
+    annotations:
+      summary: telemetry-queue 待處理訊息持續超過 10000 筆
+      description: 佇列已經積到 10000 筆以上並持續 5 分鐘,約 3 分鐘以上的產量卡在 MQ 沒進資料庫。再放著不管,RabbitMQ 記憶體/磁碟水位告警會跟著觸發,broker
+        會開始擋住 publisher。目前值:{{ $values.B.Value }} 筆。
+      runbook: 1) 確認 backend-api 容器活著:docker compose ps backend-api。2) docker compose logs --tail=100
+        backend-api,找 CRITICAL / Failed to save。3) 資料庫掛了就先救資料庫;Worker 有退避重連,DB 一好就會自己追。4) 真的要止血才 Purge
+        佇列 —— 那會直接丟掉未消費資料。
+    labels:
+      service: factory-iot
+      severity: critical
+      component: rabbitmq
+      queue: telemetry-queue
+    isPaused: false
+  - uid: fiot-queue-no-consumer
+    title: 佇列沒有任何消費者｜Worker 根本沒接上 MQ
+    condition: C
+    data:
+    - refId: A
+      relativeTimeRange:
+        from: 600
+        to: 0
+      datasourceUid: factory-iot-prometheus
+      model:
+        datasource:
+          type: prometheus
+          uid: factory-iot-prometheus
+        editorMode: code
+        expr: sum(rabbitmq_queue_consumers{queue="telemetry-queue"})
+        instant: true
+        range: false
+        intervalMs: 1000
+        maxDataPoints: 43200
+        legendFormat: __auto
+        refId: A
+    - refId: B
+      relativeTimeRange:
+        from: 600
+        to: 0
+      datasourceUid: __expr__
+      model:
+        datasource:
+          type: __expr__
+          uid: __expr__
+        conditions:
+        - evaluator:
+            params: []
+            type: gt
+          operator:
+            type: and
+          query:
+            params:
+            - B
+          reducer:
+            params: []
+            type: last
+          type: query
+        expression: A
+        reducer: last
+        type: reduce
+        intervalMs: 1000
+        maxDataPoints: 43200
+        refId: B
+    - refId: C
+      relativeTimeRange:
+        from: 600
+        to: 0
+      datasourceUid: __expr__
+      model:
+        datasource:
+          type: __expr__
+          uid: __expr__
+        conditions:
+        - evaluator:
+            params:
+            - 1
+            type: lt
+          operator:
+            type: and
+          query:
+            params:
+            - C
+          reducer:
+            params: []
+            type: last
+          type: query
+        expression: B
+        type: threshold
+        intervalMs: 1000
+        maxDataPoints: 43200
+        refId: C
+    noDataState: OK
+    execErrState: Error
+    for: 2m
+    annotations:
+      summary: telemetry-queue 上掛著 0 個消費者
+      description: RabbitMQ 看得到這條佇列,但沒有任何 consumer 註冊上來 —— 訊息只進不出,接下來一定會一路積上去。這通常代表 backend-api 沒起來、Worker
+        連線被拒(guest 的 loopback 限制),或 Worker 管線掛掉還沒重連完成。
+      runbook: 1) docker compose ps backend-api;沒起來就先看它的 log。2) log 出現 ACCESS_REFUSED → rabbitmq.conf
+        的 loopback_users.guest = false 沒掛進去。3) log 出現 Failed to connect to RabbitMQ → 確認 RABBITMQ_HOST=rabbitmq(不是
+        localhost)。4) RabbitMQ 管理 UI(:15672)→ Queues → telemetry-queue 可以直接看到 Consumers 欄位。
+    labels:
+      service: factory-iot
+      severity: critical
+      component: rabbitmq
+      queue: telemetry-queue
+    isPaused: false
+  - uid: fiot-backlog-not-draining
+    title: 有積壓但完全沒有消化｜訊息只進不出
+    condition: C
+    data:
+    - refId: A
+      relativeTimeRange:
+        from: 600
+        to: 0
+      datasourceUid: factory-iot-prometheus
+      model:
+        datasource:
+          type: prometheus
+          uid: factory-iot-prometheus
+        editorMode: code
+        expr: '(sum(rabbitmq_queue_messages_ready{queue="telemetry-queue"}) > bool 200)
+
+          * ((sum(rate(telemetry_consumed_total[5m])) or vector(0)) < bool 0.1)'
+        instant: true
+        range: false
+        intervalMs: 1000
+        maxDataPoints: 43200
+        legendFormat: __auto
+        refId: A
+    - refId: B
+      relativeTimeRange:
+        from: 600
+        to: 0
+      datasourceUid: __expr__
+      model:
+        datasource:
+          type: __expr__
+          uid: __expr__
+        conditions:
+        - evaluator:
+            params: []
+            type: gt
+          operator:
+            type: and
+          query:
+            params:
+            - B
+          reducer:
+            params: []
+            type: last
+          type: query
+        expression: A
+        reducer: last
+        type: reduce
+        intervalMs: 1000
+        maxDataPoints: 43200
+        refId: B
+    - refId: C
+      relativeTimeRange:
+        from: 600
+        to: 0
+      datasourceUid: __expr__
+      model:
+        datasource:
+          type: __expr__
+          uid: __expr__
+        conditions:
+        - evaluator:
+            params:
+            - 0
+            type: gt
+          operator:
+            type: and
+          query:
+            params:
+            - C
+          reducer:
+            params: []
+            type: last
+          type: query
+        expression: B
+        type: threshold
+        intervalMs: 1000
+        maxDataPoints: 43200
+        refId: C
+    noDataState: OK
+    execErrState: Error
+    for: 3m
+    annotations:
+      summary: 佇列有 200 筆以上待處理,但 Worker 的消化速率是 0
+      description: 這是最典型的『MQ 一直累積、worker 沒在消化』組合:broker 端看得到積壓,而 Worker 端的 telemetry_consumed_total 完全沒有在動。跟『佇列沒有任何消費者』的差別是
+        —— 這裡 consumer 可能還掛著,只是卡住不吃了(例如批次處理迴圈卡在資料庫、或 prefetch 已滿但沒人 ack)。
+      runbook: 1) curl http://localhost:8080/health/worker,看 timeSinceLastMessage 有沒有一直變大。2) 看儀表板〈Worker
+        內部緩衝深度〉:數字很大 = 吃得進來但寫不出去,問題在 DB。3) 緩衝是 0 而佇列還在積 = 訊息根本沒被 deliver,重啟 backend-api 讓它重建 consumer。4)
+        看〈訊息重送率〉:一直重送代表每筆都處理失敗被 requeue,會無限迴圈。
+    labels:
+      service: factory-iot
+      severity: critical
+      component: worker
+      queue: telemetry-queue
+    isPaused: false
+  - uid: fiot-backlog-growing
+    title: 積壓持續成長｜還沒到門檻但方向不對
+    condition: C
+    data:
+    - refId: A
+      relativeTimeRange:
+        from: 600
+        to: 0
+      datasourceUid: factory-iot-prometheus
+      model:
+        datasource:
+          type: prometheus
+          uid: factory-iot-prometheus
+        editorMode: code
+        expr: deriv(sum(rabbitmq_queue_messages_ready{queue="telemetry-queue"})[15m:1m])
+        instant: true
+        range: false
+        intervalMs: 1000
+        maxDataPoints: 43200
+        legendFormat: __auto
+        refId: A
+    - refId: B
+      relativeTimeRange:
+        from: 600
+        to: 0
+      datasourceUid: __expr__
+      model:
+        datasource:
+          type: __expr__
+          uid: __expr__
+        conditions:
+        - evaluator:
+            params: []
+            type: gt
+          operator:
+            type: and
+          query:
+            params:
+            - B
+          reducer:
+            params: []
+            type: last
+          type: query
+        expression: A
+        reducer: last
+        type: reduce
+        intervalMs: 1000
+        maxDataPoints: 43200
+        refId: B
+    - refId: C
+      relativeTimeRange:
+        from: 600
+        to: 0
+      datasourceUid: __expr__
+      model:
+        datasource:
+          type: __expr__
+          uid: __expr__
+        conditions:
+        - evaluator:
+            params:
+            - 1
+            type: gt
+          operator:
+            type: and
+          query:
+            params:
+            - C
+          reducer:
+            params: []
+            type: last
+          type: query
+        expression: B
+        type: threshold
+        intervalMs: 1000
+        maxDataPoints: 43200
+        refId: C
+    noDataState: OK
+    execErrState: Error
+    for: 15m
+    annotations:
+      summary: 佇列深度連續 15 分鐘呈上升趨勢(> 1 筆/秒)
+      description: 積壓的絕對值可能還不高,但斜率是正的而且撐了 15 分鐘 —— 代表消化端長期慢於發布端,放著不動遲早會撞上積壓門檻。這條規則是給你『在爆掉之前』的預警。目前成長率:{{
+        $values.B.Value }} 筆/秒。
+      runbook: 1) 比對〈發布 vs 消化 vs 入庫〉:差多少就是每秒補不回來的量。2) 若是資料庫變慢,先看〈批次寫入延遲 P95〉。3) 長期解:調大 TelemetryIngestionWorker
+        的 BatchSize、或多開一個消費者實例。
+    labels:
+      service: factory-iot
+      severity: warning
+      component: rabbitmq
+      queue: telemetry-queue
+    isPaused: false
+  - uid: fiot-consume-behind-publish
+    title: 消化速率追不上發布速率
+    condition: C
+    data:
+    - refId: A
+      relativeTimeRange:
+        from: 600
+        to: 0
+      datasourceUid: factory-iot-prometheus
+      model:
+        datasource:
+          type: prometheus
+          uid: factory-iot-prometheus
+        editorMode: code
+        expr: 'sum(rate(rabbitmq_queue_messages_published_total{queue="telemetry-queue"}[10m]))
+
+          - (sum(rate(telemetry_consumed_total[10m])) or vector(0))'
+        instant: true
+        range: false
+        intervalMs: 1000
+        maxDataPoints: 43200
+        legendFormat: __auto
+        refId: A
+    - refId: B
+      relativeTimeRange:
+        from: 600
+        to: 0
+      datasourceUid: __expr__
+      model:
+        datasource:
+          type: __expr__
+          uid: __expr__
+        conditions:
+        - evaluator:
+            params: []
+            type: gt
+          operator:
+            type: and
+          query:
+            params:
+            - B
+          reducer:
+            params: []
+            type: last
+          type: query
+        expression: A
+        reducer: last
+        type: reduce
+        intervalMs: 1000
+        maxDataPoints: 43200
+        refId: B
+    - refId: C
+      relativeTimeRange:
+        from: 600
+        to: 0
+      datasourceUid: __expr__
+      model:
+        datasource:
+          type: __expr__
+          uid: __expr__
+        conditions:
+        - evaluator:
+            params:
+            - 5
+            type: gt
+          operator:
+            type: and
+          query:
+            params:
+            - C
+          reducer:
+            params: []
+            type: last
+          type: query
+        expression: B
+        type: threshold
+        intervalMs: 1000
+        maxDataPoints: 43200
+        refId: C
+    noDataState: OK
+    execErrState: Error
+    for: 10m
+    annotations:
+      summary: 每秒進來的訊息比消化掉的多 5 筆以上,已持續 10 分鐘
+      description: 發布速率減去消化速率的淨值持續為正,佇列就會單調累積。目前每秒淨增:{{ $values.B.Value }} 筆。
+      runbook: 1) 這是容量問題,不是故障:要嘛減少產量,要嘛增加消化能力。2) 先確認不是 DB 拖慢(〈批次寫入延遲〉)。3) 壓測情境下屬預期行為,測完會自己收斂。
+    labels:
+      service: factory-iot
+      severity: warning
+      component: worker
+      queue: telemetry-queue
+    isPaused: false
+  - uid: fiot-redelivery-high
+    title: 訊息重送率偏高｜處理失敗被反覆 requeue
+    condition: C
+    data:
+    - refId: A
+      relativeTimeRange:
+        from: 600
+        to: 0
+      datasourceUid: factory-iot-prometheus
+      model:
+        datasource:
+          type: prometheus
+          uid: factory-iot-prometheus
+        editorMode: code
+        expr: sum(rate(rabbitmq_channel_messages_redelivered_total{queue="telemetry-queue"}[5m]))
+        instant: true
+        range: false
+        intervalMs: 1000
+        maxDataPoints: 43200
+        legendFormat: __auto
+        refId: A
+    - refId: B
+      relativeTimeRange:
+        from: 600
+        to: 0
+      datasourceUid: __expr__
+      model:
+        datasource:
+          type: __expr__
+          uid: __expr__
+        conditions:
+        - evaluator:
+            params: []
+            type: gt
+          operator:
+            type: and
+          query:
+            params:
+            - B
+          reducer:
+            params: []
+            type: last
+          type: query
+        expression: A
+        reducer: last
+        type: reduce
+        intervalMs: 1000
+        maxDataPoints: 43200
+        refId: B
+    - refId: C
+      relativeTimeRange:
+        from: 600
+        to: 0
+      datasourceUid: __expr__
+      model:
+        datasource:
+          type: __expr__
+          uid: __expr__
+        conditions:
+        - evaluator:
+            params:
+            - 1
+            type: gt
+          operator:
+            type: and
+          query:
+            params:
+            - C
+          reducer:
+            params: []
+            type: last
+          type: query
+        expression: B
+        type: threshold
+        intervalMs: 1000
+        maxDataPoints: 43200
+        refId: C
+    noDataState: OK
+    execErrState: Error
+    for: 5m
+    annotations:
+      summary: 每秒有 1 筆以上訊息被重新投遞
+      description: Worker 處理失敗時會 Nack + requeue,訊息會回到佇列再送一次。重送率一直很高代表有訊息每次都失敗,會佔著消化量能空轉,佇列因此清不掉。目前重送速率:{{
+        $values.B.Value }} 筆/秒。
+      runbook: 1) docker compose logs backend-api | grep 'Error processing message' 看是哪一種例外。2) 反覆失敗的訊息目前沒有
+        dead-letter 機制,會一直循環 —— 需要時得手動處理。
+    labels:
+      service: factory-iot
+      severity: warning
+      component: worker
+      queue: telemetry-queue
+    isPaused: false
