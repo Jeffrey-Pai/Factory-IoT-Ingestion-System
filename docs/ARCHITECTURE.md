@@ -69,6 +69,7 @@ flowchart TB
         subgraph net["Docker Network"]
             R["rabbitmq<br/>rabbitmq:3.13-management"]
             S["mssql<br/>SQL Server 2022 Express"]
+            C["redis<br/>redis:7.4-alpine"]
             B["backend-api<br/>ASP.NET Core"]
             SI["simulator<br/>.NET Console"]
             P["prometheus<br/>v2.52.0"]
@@ -79,12 +80,14 @@ flowchart TB
     SI --> R
     B --> R
     B --> S
+    B --> C
     P --> B
     P --> R
     G --> P
 
     R -.->|"5672 / 15672 / 15692"| host
     S -.->|"1433"| host
+    C -.->|"6379"| host
     B -.->|"8080"| host
     P -.->|"9090"| host
     G -.->|"3000"| host
@@ -96,12 +99,13 @@ flowchart TB
 |------|--------|------|--------------------|
 | `rabbitmq` | 5672 (AMQP) / 15672 (管理 UI) / 15692 (`/metrics`) | 訊息佇列 | — |
 | `mssql` | 1433 | 關聯式資料庫 | — |
-| `backend-api` | 8080 | REST API + `/metrics` | rabbitmq、mssql（healthy 後才啟動） |
+| `redis` | 6379 | 分析讀取快取（純快取，可失） | — |
+| `backend-api` | 8080 | REST API + `/metrics` | rabbitmq、mssql、redis（healthy 後才啟動） |
 | `simulator` | —（不對外） | 產生遙測資料 | rabbitmq（healthy 後才啟動） |
 | `prometheus` | 9090 | 指標收集（backend-api + rabbitmq） | — |
 | `grafana` | 3000 | 監控儀表板 + 告警（由 `grafana/` provisioning） | prometheus |
 
-> `rabbitmq` 與 `mssql` 都設定了 `healthcheck`，`backend-api` / `simulator` 會等它們變成 healthy 後才啟動，避免競態（race condition）。
+> `rabbitmq`、`mssql`、`redis` 都設定了 `healthcheck`，`backend-api` / `simulator` 會等依賴變成 healthy 後才啟動，避免競態（race condition）。`redis` 雖然是啟動依賴，但 API 對它是 **fail-open** —— 執行期 Redis 掛掉只會讓讀取退回直接查 DB，不影響正確性（見 [CACHING.md](./CACHING.md)）。
 
 ---
 
@@ -364,6 +368,7 @@ Prometheus 每 15 秒抓**兩個**目標。這一點是刻意的設計，不是�
 | `telemetry_rollup_buckets_total` | Counter | 已建立的預聚合時間桶數 |
 | `telemetry_rollup_rows_total` | Counter | 已寫入的聚合列數 |
 | `telemetry_rows_purged_total` | Counter | 保留期清理掉的列數（依 tier 分標籤） |
+| `analytics_cache_requests_total` | Counter | 分析讀取快取查詢數（依 `region` 家族與 `outcome`=hit/miss/error 分標籤）；命中率與 Redis 健康度都由它導出（見 [CACHING.md](./CACHING.md)） |
 
 四個 `telemetry_worker_*` Gauge 是為了讓「Worker 有沒有在消化」能被**直接**告警而存在的。Counter 停止增長是個
 歧義訊號；Gauge 則不論流量高低都持續回報狀態。Worker 內部用屬性 setter 統一更新
@@ -413,6 +418,7 @@ Grafana 的資料來源、3 張儀表板與 19 條告警規則全部由 `grafana
 | Web 框架 | ASP.NET Core Minimal API | 8.0 |
 | ORM | Entity Framework Core（SqlServer provider） | 8.0.4 |
 | 資料庫 | SQL Server 2022 Express | 2022-latest |
+| 分析讀取快取 | Redis（`Microsoft.Extensions.Caching.StackExchangeRedis`） | 7.4 / 8.0.0 |
 | 訊息佇列 | RabbitMQ（`RabbitMQ.Client`） | 3.13 / 7.1.2 |
 | 指標 | prometheus-net | 8.2.1 |
 | 指標收集 | Prometheus | v2.52.0 |
@@ -437,6 +443,8 @@ Grafana 的資料來源、3 張儀表板與 19 條告警規則全部由 `grafana
 | **儲存分層而非單純冷熱搬家** | 時序資料的槓桿在「降解析度」而不是「換位置放」：把逐筆資料搬到另一張同結構的冷表，總量一點沒少、儀表板查詢一樣慢，還多付一次讀寫。改成短保留期的熱層 + 預聚合的溫／冷層，資料庫大小才會**穩定**而不是無限成長。 |
 | **時間為前導的叢集鍵** | 隨機 GUID 當叢集鍵會讓寫入散佈全表，且隨資料量持續惡化。`(Timestamp, Id)` 讓寫入變尾端追加，同時讓聚合與清理都變成連續範圍操作。 |
 | **聚合與清理獨立成一個 Worker** | 聚合、清理是以秒計的批次操作；攝取是對延遲敏感的迴圈。分開跑讓兩者互不阻塞，其中一邊失敗也不會拖垮另一邊。 |
+| **分析讀取端加一層短 TTL Redis 快取** | 唯讀分析端點被前端所有客戶端同步輪詢、被 k6 壓測、被 Prometheus 抓取，而每次算出的答案對所有人相同；一個 1–5 秒的分散式快取把這些重複查詢收斂成每區間一次,保護 buffer pool 只有 1 GB 的 SQL Server Express。快取以 decorator 包住 `ITelemetryRepository`(端點零改動)、**fail-open**(Redis 掛掉就退回查 DB)、寫入路徑一律不碰。詳見 [CACHING.md](./CACHING.md)。 |
+| **快取只放讀取端,不碰寫入/不當真相來源** | Redis 在這裡是純快取,資料隨時可從 DB 重建。攝取路徑(RabbitMQ→Channel→批次)已對延遲最佳化,塞快取進去只多一個故障點;系統真相仍是 SQL Server + 預聚合分層。 |
 
 ### ⚠️ 一個曾經踩過的雷：RabbitMQ 主機解析
 
@@ -457,6 +465,8 @@ Worker 落庫時透過 `SensorReading.FromTelemetry(...)` 把每筆寬表快照�
 
 ✅ **監控／分析查詢（read 端）：** `GET /api/v1/machines`、`GET /api/v1/telemetry/{machineId}/stats` 與 `GET /api/v1/fleet/status` 回傳 `FactoryIoT.Domain.Analytics` 下的 read-model record（`MachineTelemetrySummary`／`TelemetryStatistics`／`FleetStatus`）。這條 read 路徑**依視窗寬度自動選層**：3 小時以內讀 `Telemetries` 原始列、更寬的視窗讀預聚合時間桶、機台總覽直接讀 `MachineSummaries`。聚合一律下推到 SQL Server 以 `GROUP BY` 完成，API 不會為了統計把原始資料整批撈回記憶體；整條 read 路徑不參與寫入，因此不影響上面的落庫管線。
 
+當有設定 Redis 時（Compose 預設有），這四個唯讀端點前面還會多一層短 TTL 的分散式快取：以 decorator 包住 `ITelemetryRepository`，把儀表板/壓測/Prometheus 對同一個聚合答案的重複查詢收斂成每區間一次。快取 **fail-open**（Redis 掛掉就透明退回查 DB）、寫入路徑一律直通、API 契約與前端完全不變。設計、設定與運維見 **[CACHING.md](./CACHING.md)**。
+
 ✅ **`GET /api/v1/data-lifecycle`：** 回報各層目前保有的資料範圍、聚合浮水印與落後秒數、生效中的保留期。刻意不對熱層做 `COUNT(*)`（那正是這套設計要消滅的存取模式）。
 
 🚧 **仍未接上的骨架程式碼：**
@@ -475,6 +485,7 @@ Worker 落庫時透過 `SensorReading.FromTelemetry(...)` 把每筆寬表快照�
 ## 12. 延伸閱讀
 
 - 🗄️ [資料生命週期 DATA-LIFECYCLE.md](./DATA-LIFECYCLE.md) — 冷熱分層、預聚合、保留期、容量規劃與流量成長時的擴充路線
+- ⚡ [讀取快取 CACHING.md](./CACHING.md) — 為什麼導入 Redis、用在哪、fail-open 設計、設定與運維
 - 🛠️ [操作手冊 OPERATIONS.md](./OPERATIONS.md) — 啟動、驗證、監控設定、壓測、故障排除
 - 🚨 [監控與告警 MONITORING.md](./MONITORING.md) — 儀表板導覽、19 條告警規則、門檻調整、積壓演練
 - 👩‍💻 [開發者指南 DEVELOPMENT.md](./DEVELOPMENT.md) — 本機開發、加 API、加 Migration、除錯

@@ -51,6 +51,26 @@ services:
       retries: 5
 
   # ──────────────────────────────────────────────
+  # Distributed Cache
+  # ──────────────────────────────────────────────
+  # Read-through cache in front of the analytics API. No system-of-record data lives here, so it
+  # runs with persistence off and a bounded LRU: if it fills or restarts, entries simply repopulate
+  # from SQL Server on the next miss. The API fails open, so the stack stays correct even when this
+  # is down — it just falls back to querying the database directly.
+  redis:
+    image: redis:7.4-alpine
+    container_name: redis
+    restart: unless-stopped
+    command: ["redis-server", "--save", "", "--appendonly", "no", "--maxmemory", "256mb", "--maxmemory-policy", "allkeys-lru"]
+    ports:
+      - "6379:6379"
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  # ──────────────────────────────────────────────
   # Metrics Collection
   # ──────────────────────────────────────────────
   prometheus:
@@ -141,10 +161,19 @@ services:
       # dashboard draws a healthy fleet as stale. Only a safety clamp: it binds
       # solely when aggregation has stalled or is switched off.
       DataRetention__RosterTailMinutes: "15"
+      # ── Analytics read cache ───────────────────────────────────────────────
+      # Points the API at the redis service. Double-underscore binds to the
+      # Cache:* section, the idiomatic ASP.NET convention — deliberately unlike
+      # the legacy single-underscore RABBITMQ_* vars above. TTLs and the on/off
+      # switch have working defaults in appsettings.json; override here as
+      # Cache__RosterTtlSeconds, Cache__Enabled, etc. if you need to tune them.
+      Cache__RedisConnection: "redis:6379"
     depends_on:
       rabbitmq:
         condition: service_healthy
       mssql:
+        condition: service_healthy
+      redis:
         condition: service_healthy
 
   # ──────────────────────────────────────────────

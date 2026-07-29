@@ -1,6 +1,7 @@
 using FactoryIoT.Application.Common.Interfaces;
 using FactoryIoT.Application.DTOs;
 using FactoryIoT.Domain.Interfaces;
+using FactoryIoT.Infrastructure.Caching;
 using FactoryIoT.Infrastructure.Configuration;
 using FactoryIoT.Infrastructure.Messaging;
 using FactoryIoT.Infrastructure.Persistence;
@@ -28,10 +29,48 @@ builder.Services.AddDbContext<FactoryIoTDbContext>(options =>
 builder.Services.Configure<DataRetentionOptions>(
     builder.Configuration.GetSection(DataRetentionOptions.SectionName));
 
-// Register repositories
-builder.Services.AddScoped<ITelemetryRepository, TelemetryRepository>();
+// Register repositories. ISensorReadingRepository and IDataLifecycleRepository are plain; the
+// telemetry repository is wired below because it may be wrapped in a caching decorator.
 builder.Services.AddScoped<ISensorReadingRepository, SensorReadingRepository>();
 builder.Services.AddScoped<IDataLifecycleRepository, DataLifecycleRepository>();
+
+// ── Analytics read cache (optional) ──────────────────────────────────────────────────────────
+// The read-only analytics endpoints (/machines, /fleet/status, /telemetry/{id}/stats, /latest) are
+// polled in lockstep by every dashboard client, hammered by k6, and scraped by Prometheus — and
+// each computes the same answer for all of them. A short-TTL distributed cache collapses that
+// fan-in onto one query per interval and shields SQL Server Express (whose 1 GB buffer pool and
+// 10 GB ceiling are the reason the whole tiered-storage design exists). It is deliberately optional
+// and fails open: with no Redis configured the read path runs straight against the database exactly
+// as before, and a Redis that falls over at runtime degrades reads to "slower", never to errors.
+// Config binds via the ASP.NET Cache__* double-underscore convention (e.g. Cache__RedisConnection).
+builder.Services.Configure<AnalyticsCacheOptions>(
+    builder.Configuration.GetSection(AnalyticsCacheOptions.SectionName));
+var cacheOptions = builder.Configuration
+    .GetSection(AnalyticsCacheOptions.SectionName)
+    .Get<AnalyticsCacheOptions>() ?? new AnalyticsCacheOptions();
+
+if (cacheOptions.IsActive)
+{
+    builder.Services.AddStackExchangeRedisCache(options =>
+    {
+        options.Configuration = cacheOptions.RedisConnection;
+        options.InstanceName = cacheOptions.InstanceName;
+    });
+    builder.Services.AddSingleton<IAnalyticsCache, RedisAnalyticsCache>();
+
+    // Decorate: resolve the concrete repository and wrap it. Both are scoped and share the request's
+    // DbContext, so the ingestion worker's write transaction (which spans the telemetry and sensor
+    // repositories) is unaffected — the decorator forwards AddRangeAsync straight through.
+    builder.Services.AddScoped<TelemetryRepository>();
+    builder.Services.AddScoped<ITelemetryRepository>(sp => new CachingTelemetryRepository(
+        sp.GetRequiredService<TelemetryRepository>(),
+        sp.GetRequiredService<IAnalyticsCache>(),
+        sp.GetRequiredService<IOptions<AnalyticsCacheOptions>>()));
+}
+else
+{
+    builder.Services.AddScoped<ITelemetryRepository, TelemetryRepository>();
+}
 
 // Register RabbitMQ connection configuration (host/port/credentials).
 //

@@ -7,6 +7,7 @@
 |------|------|--------|
 | 📐 [系統架構 ARCHITECTURE.md](./docs/ARCHITECTURE.md) | 架構圖、資料流、分層設計、技術決策 | 想了解「系統在幹嘛」 |
 | 🗄️ [資料生命週期 DATA-LIFECYCLE.md](./docs/DATA-LIFECYCLE.md) | 冷熱分層、預聚合、保留期、容量規劃與擴充路線 | 擔心「資料越存越多怎麼辦」 |
+| ⚡ [讀取快取 CACHING.md](./docs/CACHING.md) | 為什麼導入 Redis、用在哪、fail-open 設計、設定與運維 | 想知道「為什麼有 Redis、快取怎麼運作」 |
 | 🛠️ [操作手冊 OPERATIONS.md](./docs/OPERATIONS.md) | 啟動、驗證、監控設定、壓測、故障排除 | 要把系統跑起來、維運 |
 | 🚨 [監控與告警 MONITORING.md](./docs/MONITORING.md) | 儀表板導覽、19 條告警規則、門檻怎麼調、積壓演練 | 要知道「出事會不會有人通知我」 |
 | 👩‍💻 [開發者指南 DEVELOPMENT.md](./docs/DEVELOPMENT.md) | 本機開發、加 API、加 Migration、除錯 | 要改程式碼 |
@@ -22,12 +23,15 @@ flowchart LR
     MQ --> W["⚙️ Backend Worker<br/>Channel 緩衝 + 批次寫入"]
     W --> DB[("🗄️ SQL Server<br/>熱層 / 聚合層")]
     LIFE["🧹 Lifecycle Worker<br/>預聚合 + 保留期清理"] --> DB
-    API["🌐 REST API"] --> DB
+    API["🌐 REST API"] --> CACHE[["⚡ Redis<br/>分析讀取快取"]]
+    CACHE -. "miss" .-> DB
     DASH["🖥️ 前端儀表板<br/>React + Vite"] --> API
     MQ -.積壓、消費者數.-> PROM["📈 Prometheus"]
     W -.消化、入庫、失敗.-> PROM
     PROM --> GRAF["📊 Grafana<br/>儀表板 + 告警"]
 ```
+
+> 分析讀取端點前有一層短 TTL 的 Redis 快取(cache-aside、fail-open),把儀表板/壓測的重複查詢擋在受限的 SQL Server Express 之外;Redis 掛掉會透明退回查 DB。詳見 [CACHING.md](./docs/CACHING.md)。
 
 > 詳細架構、資料流時序圖與分層說明請見 [ARCHITECTURE.md](./docs/ARCHITECTURE.md)。
 
@@ -39,7 +43,7 @@ flowchart LR
 
 ### 1. 啟動基礎設施與服務
 
-啟動所有服務（RabbitMQ、SQL Server、Prometheus、Grafana、Backend API、Simulator）：
+啟動所有服務（RabbitMQ、SQL Server、Redis、Prometheus、Grafana、Backend API、Simulator）：
 
 ```bash
 docker-compose up -d
@@ -58,6 +62,7 @@ docker-compose ps
 - **RabbitMQ Management UI**: http://localhost:15672 (帳號/密碼: `guest`/`guest`)
 - **RabbitMQ Metrics**: http://localhost:15692/metrics (Prometheus 格式，含佇列積壓)
 - **SQL Server**: localhost,1433 (帳號/密碼: `sa`/`IoT_Secret123!`) - 可使用 SSMS 管理
+- **Redis**: localhost:6379 - 分析讀取快取（`redis-cli KEYS 'factoryiot:*'` 可檢視）
 - **Backend API Health**: http://localhost:8080/health
 - **Backend API Swagger**: http://localhost:8080/swagger (開發環境)
 - **Prometheus**: http://localhost:9090

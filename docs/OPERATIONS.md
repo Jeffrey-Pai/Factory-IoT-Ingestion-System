@@ -54,7 +54,7 @@ docker compose up -d
 
 ```mermaid
 flowchart LR
-    A["docker compose up -d"] --> B["rabbitmq / mssql 啟動<br/>並等待 healthy"]
+    A["docker compose up -d"] --> B["rabbitmq / mssql / redis 啟動<br/>並等待 healthy"]
     B --> C["backend-api 啟動<br/>自動跑 DB Migration"]
     B --> D["simulator 啟動<br/>開始發布遙測"]
     C --> E["Worker 連上 MQ<br/>開始消費入庫"]
@@ -67,7 +67,7 @@ flowchart LR
 docker compose ps
 ```
 
-理想狀態下 6 個容器都應該是 `Up`（`rabbitmq`、`mssql` 會標示 `healthy`）。
+理想狀態下 7 個容器都應該是 `Up`（`rabbitmq`、`mssql`、`redis` 會標示 `healthy`）。
 
 ---
 
@@ -81,10 +81,13 @@ docker compose ps
 | RabbitMQ 管理 UI | http://localhost:15672 | `guest` | `guest` |
 | RabbitMQ — Metrics（含佇列積壓） | http://localhost:15692/metrics | — | — |
 | SQL Server | `localhost,1433` | `sa` | `IoT_Secret123!` |
+| Redis（分析讀取快取） | `localhost:6379` | — | — |
 | Prometheus | http://localhost:9090 | — | — |
 | Grafana（儀表板與告警已預先設定） | http://localhost:3000 | `admin` | `admin` |
 
 > ⚠️ 以上帳密僅供本機開發用，**切勿用於正式環境**。
+
+> ⚡ `redis` 是分析讀取端點的快取，對 API 是 **fail-open**：把它停掉(`docker compose stop redis`)系統仍正常，只是讀取改為直接查 DB。檢視快取內容:`docker exec -it redis redis-cli KEYS 'factoryiot:*'`。設計與運維見 [CACHING.md](./CACHING.md)。
 
 ### API 端點一覽
 
