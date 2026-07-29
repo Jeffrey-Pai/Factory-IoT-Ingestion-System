@@ -1,0 +1,20 @@
+# Loads every dashboard JSON under /etc/grafana/dashboards into the "Factory IoT"
+# folder. docker-compose bind-mounts ./grafana/dashboards there.
+#
+# allowUiUpdates is false, so these dashboards are read-only in the browser: edit the
+# JSON file and Grafana picks the change up within updateIntervalSeconds. To
+# experiment freely, use "Dashboard settings → Save as..." to make your own copy.
+apiVersion: 1
+
+providers:
+  - name: factory-iot
+    orgId: 1
+    folder: Factory IoT
+    folderUid: factory-iot
+    type: file
+    disableDeletion: false
+    updateIntervalSeconds: 30
+    allowUiUpdates: false
+    options:
+      path: /etc/grafana/dashboards
+      foldersFromFilesStructure: false

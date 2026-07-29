@@ -1,0 +1,571 @@
+# 告警規則:Worker 消化與入庫
+#
+# 由 Grafana 的 alerting provisioning 自動載入 —— 開機就存在,不必在 UI 裡建。
+# Provisioning 進來的規則在 UI 上是**唯讀**的,要調整就改這個檔案再
+# `docker compose restart grafana`。
+#
+# ── 怎麼調門檻 ───────────────────────────────────────────────────────────────
+# 每條規則的 data 都是固定的三段:
+#   A = PromQL 查詢(instant)   B = 取最後一個值   C = 比門檻
+# 所以「門檻」永遠在該規則 data 陣列最後一段(refId: C)的
+#   conditions[0].evaluator.params[0]
+# 「要撐多久才真的燒起來」則是規則層級的 `for`。
+# 各規則的門檻與理由整理在 docs/MONITORING.md。
+#
+# ── noDataState 的取捨 ───────────────────────────────────────────────────────
+# 大部分規則設 OK:指標消失(例如服務整個掛掉)時不重複燒同一件事,
+# 改由 fiot-rabbitmq-down / fiot-backend-down 這兩條(noDataState: Alerting)兜底,
+# 避免一次故障同時噴出十幾封通知。
+apiVersion: 1
+
+groups:
+- orgId: 1
+  name: worker-health
+  folder: Factory IoT
+  interval: 1m
+  rules:
+  - uid: fiot-worker-unhealthy
+    title: Worker 不健康｜未連上 MQ 或批次處理停擺
+    condition: C
+    data:
+    - refId: A
+      relativeTimeRange:
+        from: 600
+        to: 0
+      datasourceUid: factory-iot-prometheus
+      model:
+        datasource:
+          type: prometheus
+          uid: factory-iot-prometheus
+        editorMode: code
+        expr: min(telemetry_worker_healthy)
+        instant: true
+        range: false
+        intervalMs: 1000
+        maxDataPoints: 43200
+        legendFormat: __auto
+        refId: A
+    - refId: B
+      relativeTimeRange:
+        from: 600
+        to: 0
+      datasourceUid: __expr__
+      model:
+        datasource:
+          type: __expr__
+          uid: __expr__
+        conditions:
+        - evaluator:
+            params: []
+            type: gt
+          operator:
+            type: and
+          query:
+            params:
+            - B
+          reducer:
+            params: []
+            type: last
+          type: query
+        expression: A
+        reducer: last
+        type: reduce
+        intervalMs: 1000
+        maxDataPoints: 43200
+        refId: B
+    - refId: C
+      relativeTimeRange:
+        from: 600
+        to: 0
+      datasourceUid: __expr__
+      model:
+        datasource:
+          type: __expr__
+          uid: __expr__
+        conditions:
+        - evaluator:
+            params:
+            - 1
+            type: lt
+          operator:
+            type: and
+          query:
+            params:
+            - C
+          reducer:
+            params: []
+            type: last
+          type: query
+        expression: B
+        type: threshold
+        intervalMs: 1000
+        maxDataPoints: 43200
+        refId: C
+    noDataState: OK
+    execErrState: Error
+    for: 2m
+    annotations:
+      summary: telemetry_worker_healthy = 0,Worker 自報異常
+      description: Worker 自己回報 isConnected / isProcessing 至少有一個是 false,跟 /health/worker 回 503 是同一個狀態。此時佇列一定會開始累積。Worker
+        有 5 秒退避的自動重連,若這條告警持續不解除,代表重連一直失敗。
+      runbook: 1) curl http://localhost:8080/health/worker 看完整狀態。2) docker compose logs --tail=100 backend-api,找
+        pipeline failed unexpectedly。3) 確認 rabbitmq 容器 healthy。
+    labels:
+      service: factory-iot
+      severity: critical
+      component: worker
+    isPaused: false
+  - uid: fiot-worker-no-message
+    title: Worker 太久沒收到訊息
+    condition: C
+    data:
+    - refId: A
+      relativeTimeRange:
+        from: 600
+        to: 0
+      datasourceUid: factory-iot-prometheus
+      model:
+        datasource:
+          type: prometheus
+          uid: factory-iot-prometheus
+        editorMode: code
+        expr: time() - max(telemetry_worker_last_message_timestamp_seconds > 0)
+        instant: true
+        range: false
+        intervalMs: 1000
+        maxDataPoints: 43200
+        legendFormat: __auto
+        refId: A
+    - refId: B
+      relativeTimeRange:
+        from: 600
+        to: 0
+      datasourceUid: __expr__
+      model:
+        datasource:
+          type: __expr__
+          uid: __expr__
+        conditions:
+        - evaluator:
+            params: []
+            type: gt
+          operator:
+            type: and
+          query:
+            params:
+            - B
+          reducer:
+            params: []
+            type: last
+          type: query
+        expression: A
+        reducer: last
+        type: reduce
+        intervalMs: 1000
+        maxDataPoints: 43200
+        refId: B
+    - refId: C
+      relativeTimeRange:
+        from: 600
+        to: 0
+      datasourceUid: __expr__
+      model:
+        datasource:
+          type: __expr__
+          uid: __expr__
+        conditions:
+        - evaluator:
+            params:
+            - 300
+            type: gt
+          operator:
+            type: and
+          query:
+            params:
+            - C
+          reducer:
+            params: []
+            type: last
+          type: query
+        expression: B
+        type: threshold
+        intervalMs: 1000
+        maxDataPoints: 43200
+        refId: C
+    noDataState: OK
+    execErrState: Error
+    for: 2m
+    annotations:
+      summary: Worker 已經超過 5 分鐘沒有從 MQ 收到任何訊息
+      description: 距離上次收到訊息已經 {{ $values.B.Value }} 秒。若同時佇列是空的,代表是上游(simulator)停了,不見得是壞事;若佇列有積壓卻收不到訊息,那就是投遞鏈路斷了,要當故障處理。
+      runbook: 1) 先看儀表板上的〈佇列積壓 Ready〉:是 0 就是上游沒在發。2) docker compose ps simulator / docker compose logs
+        -f simulator。3) 佇列有積壓卻收不到 → 重啟 backend-api 重建 consumer。
+    labels:
+      service: factory-iot
+      severity: warning
+      component: worker
+    isPaused: false
+  - uid: fiot-worker-not-writing
+    title: 有消化但沒有入庫｜資料卡在 Worker 進不了 DB
+    condition: C
+    data:
+    - refId: A
+      relativeTimeRange:
+        from: 600
+        to: 0
+      datasourceUid: factory-iot-prometheus
+      model:
+        datasource:
+          type: prometheus
+          uid: factory-iot-prometheus
+        editorMode: code
+        expr: '((sum(rate(telemetry_consumed_total[5m])) or vector(0)) > bool 0.1)
+
+          * ((sum(rate(telemetry_written_total[5m])) or vector(0)) < bool 0.01)'
+        instant: true
+        range: false
+        intervalMs: 1000
+        maxDataPoints: 43200
+        legendFormat: __auto
+        refId: A
+    - refId: B
+      relativeTimeRange:
+        from: 600
+        to: 0
+      datasourceUid: __expr__
+      model:
+        datasource:
+          type: __expr__
+          uid: __expr__
+        conditions:
+        - evaluator:
+            params: []
+            type: gt
+          operator:
+            type: and
+          query:
+            params:
+            - B
+          reducer:
+            params: []
+            type: last
+          type: query
+        expression: A
+        reducer: last
+        type: reduce
+        intervalMs: 1000
+        maxDataPoints: 43200
+        refId: B
+    - refId: C
+      relativeTimeRange:
+        from: 600
+        to: 0
+      datasourceUid: __expr__
+      model:
+        datasource:
+          type: __expr__
+          uid: __expr__
+        conditions:
+        - evaluator:
+            params:
+            - 0
+            type: gt
+          operator:
+            type: and
+          query:
+            params:
+            - C
+          reducer:
+            params: []
+            type: last
+          type: query
+        expression: B
+        type: threshold
+        intervalMs: 1000
+        maxDataPoints: 43200
+        refId: C
+    noDataState: OK
+    execErrState: Error
+    for: 5m
+    annotations:
+      summary: 消化速率 > 0 但入庫速率是 0
+      description: 訊息有從 MQ 吃進來,卻沒有任何一筆寫進 SQL Server。資料正堆在 Worker 的記憶體緩衝裡,重啟容器就會全部消失。
+      runbook: 1) docker compose ps mssql,確認容器 healthy。2) docker compose logs backend-api | grep -i 'save\|batch'
+        看資料庫錯誤。3) 看〈Worker 內部緩衝深度〉是不是一路往上 —— 那就是還沒落地的資料量。
+    labels:
+      service: factory-iot
+      severity: critical
+      component: database
+    isPaused: false
+  - uid: fiot-write-failures
+    title: 批次寫入失敗｜已經發生資料遺失
+    condition: C
+    data:
+    - refId: A
+      relativeTimeRange:
+        from: 600
+        to: 0
+      datasourceUid: factory-iot-prometheus
+      model:
+        datasource:
+          type: prometheus
+          uid: factory-iot-prometheus
+        editorMode: code
+        expr: sum(increase(telemetry_failed_total[10m]))
+        instant: true
+        range: false
+        intervalMs: 1000
+        maxDataPoints: 43200
+        legendFormat: __auto
+        refId: A
+    - refId: B
+      relativeTimeRange:
+        from: 600
+        to: 0
+      datasourceUid: __expr__
+      model:
+        datasource:
+          type: __expr__
+          uid: __expr__
+        conditions:
+        - evaluator:
+            params: []
+            type: gt
+          operator:
+            type: and
+          query:
+            params:
+            - B
+          reducer:
+            params: []
+            type: last
+          type: query
+        expression: A
+        reducer: last
+        type: reduce
+        intervalMs: 1000
+        maxDataPoints: 43200
+        refId: B
+    - refId: C
+      relativeTimeRange:
+        from: 600
+        to: 0
+      datasourceUid: __expr__
+      model:
+        datasource:
+          type: __expr__
+          uid: __expr__
+        conditions:
+        - evaluator:
+            params:
+            - 0
+            type: gt
+          operator:
+            type: and
+          query:
+            params:
+            - C
+          reducer:
+            params: []
+            type: last
+          type: query
+        expression: B
+        type: threshold
+        intervalMs: 1000
+        maxDataPoints: 43200
+        refId: C
+    noDataState: OK
+    execErrState: Error
+    for: 1m
+    annotations:
+      summary: 最近 10 分鐘有批次重試 3 次後仍寫入失敗
+      description: telemetry_failed_total 在動,代表某批資料重試 3 次後被放棄,那批遙測**已經永久遺失**(訊息已 ack,不會再回到佇列)。最近 10 分鐘遺失筆數:{{
+        $values.B.Value }}。
+      runbook: 1) docker compose logs backend-api | grep CRITICAL 找出失敗批次與原因。2) 優先讓資料庫恢復,避免持續擴大。3) 這是設計上的取捨:目前沒有
+        dead-letter queue,失敗批次不會被保留。
+    labels:
+      service: factory-iot
+      severity: critical
+      component: database
+    isPaused: false
+  - uid: fiot-batch-latency-high
+    title: 批次寫入延遲過高｜資料庫變成瓶頸
+    condition: C
+    data:
+    - refId: A
+      relativeTimeRange:
+        from: 600
+        to: 0
+      datasourceUid: factory-iot-prometheus
+      model:
+        datasource:
+          type: prometheus
+          uid: factory-iot-prometheus
+        editorMode: code
+        expr: histogram_quantile(0.95, sum by (le) (rate(telemetry_batch_processing_seconds_bucket[10m])))
+        instant: true
+        range: false
+        intervalMs: 1000
+        maxDataPoints: 43200
+        legendFormat: __auto
+        refId: A
+    - refId: B
+      relativeTimeRange:
+        from: 600
+        to: 0
+      datasourceUid: __expr__
+      model:
+        datasource:
+          type: __expr__
+          uid: __expr__
+        conditions:
+        - evaluator:
+            params: []
+            type: gt
+          operator:
+            type: and
+          query:
+            params:
+            - B
+          reducer:
+            params: []
+            type: last
+          type: query
+        expression: A
+        reducer: last
+        type: reduce
+        intervalMs: 1000
+        maxDataPoints: 43200
+        refId: B
+    - refId: C
+      relativeTimeRange:
+        from: 600
+        to: 0
+      datasourceUid: __expr__
+      model:
+        datasource:
+          type: __expr__
+          uid: __expr__
+        conditions:
+        - evaluator:
+            params:
+            - 2
+            type: gt
+          operator:
+            type: and
+          query:
+            params:
+            - C
+          reducer:
+            params: []
+            type: last
+          type: query
+        expression: B
+        type: threshold
+        intervalMs: 1000
+        maxDataPoints: 43200
+        refId: C
+    noDataState: OK
+    execErrState: Error
+    for: 10m
+    annotations:
+      summary: 批次寫入 P95 延遲超過 2 秒
+      description: 批次觸發間隔是 2 秒,寫入 P95 已經追上甚至超過這個間隔,代表上一批還沒寫完下一批就到了 —— 消化速度會被資料庫拉住,佇列開始積。目前 P95:{{ $values.B.Value
+        }} 秒。
+      runbook: 1) 看 SQL Server 的資源使用(CPU / IO)。2) 確認 Telemetries / SensorReadings 的索引沒有拖慢大量 INSERT。3)
+        調整 TelemetryIngestionWorker 的 BatchSize(目前 100)。
+    labels:
+      service: factory-iot
+      severity: warning
+      component: database
+    isPaused: false
+  - uid: fiot-worker-buffer-high
+    title: Worker 內部緩衝暴增｜吃得進來、寫不出去
+    condition: C
+    data:
+    - refId: A
+      relativeTimeRange:
+        from: 600
+        to: 0
+      datasourceUid: factory-iot-prometheus
+      model:
+        datasource:
+          type: prometheus
+          uid: factory-iot-prometheus
+        editorMode: code
+        expr: max(telemetry_worker_buffer_depth)
+        instant: true
+        range: false
+        intervalMs: 1000
+        maxDataPoints: 43200
+        legendFormat: __auto
+        refId: A
+    - refId: B
+      relativeTimeRange:
+        from: 600
+        to: 0
+      datasourceUid: __expr__
+      model:
+        datasource:
+          type: __expr__
+          uid: __expr__
+        conditions:
+        - evaluator:
+            params: []
+            type: gt
+          operator:
+            type: and
+          query:
+            params:
+            - B
+          reducer:
+            params: []
+            type: last
+          type: query
+        expression: A
+        reducer: last
+        type: reduce
+        intervalMs: 1000
+        maxDataPoints: 43200
+        refId: B
+    - refId: C
+      relativeTimeRange:
+        from: 600
+        to: 0
+      datasourceUid: __expr__
+      model:
+        datasource:
+          type: __expr__
+          uid: __expr__
+        conditions:
+        - evaluator:
+            params:
+            - 5000
+            type: gt
+          operator:
+            type: and
+          query:
+            params:
+            - C
+          reducer:
+            params: []
+            type: last
+          type: query
+        expression: B
+        type: threshold
+        intervalMs: 1000
+        maxDataPoints: 43200
+        refId: C
+    noDataState: OK
+    execErrState: Error
+    for: 5m
+    annotations:
+      summary: Worker 記憶體緩衝累積超過 5000 筆
+      description: 訊息已經從 RabbitMQ 取出、放進 Worker 的 Channel 緩衝,但還沒寫進資料庫。這個緩衝是 unbounded 的,所以 MQ 那邊看起來很乾淨,風險其實全部轉移到了記憶體
+        —— 容器一重啟這些資料就沒了。目前深度:{{ $values.B.Value }} 筆。
+      runbook: 1) 這幾乎一定是資料庫寫入變慢,先看〈批次寫入延遲〉與 mssql 容器狀態。2) 在緩衝清空前不要重啟 backend-api,會直接丟資料。
+    labels:
+      service: factory-iot
+      severity: warning
+      component: worker
+    isPaused: false

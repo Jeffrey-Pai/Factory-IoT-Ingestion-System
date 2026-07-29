@@ -1,0 +1,33 @@
+# 告警的「怎麼分流、多久通知一次」(notification policy tree)
+#
+# 這份 policy 會**取代** Grafana 內建的預設路由。
+#
+# 預設路由:所有 service=factory-iot 的告警 → factory-iot-default。
+# 子路由:severity=critical → factory-iot-critical,而且通知得更急、重複得更勤。
+#
+# group_by 用 alertname:同一條規則在多個 instance 上同時燒起來會併成一封,
+# 不會被洗版;不同規則則分開通知,不會互相蓋掉。
+apiVersion: 1
+
+policies:
+  - orgId: 1
+    receiver: factory-iot-default
+    group_by:
+      - grafana_folder
+      - alertname
+    # 第一次燒起來後等 30s,把同一組的其他 instance 一起收進同一封通知
+    group_wait: 30s
+    # 同一組後續有新成員時,最短間隔 2 分鐘
+    group_interval: 2m
+    # 一直沒被解決的話,每 4 小時再提醒一次
+    repeat_interval: 4h
+    routes:
+      - receiver: factory-iot-critical
+        object_matchers:
+          - ['severity', '=', 'critical']
+        group_by:
+          - alertname
+        group_wait: 10s
+        group_interval: 1m
+        repeat_interval: 1h
+        continue: false

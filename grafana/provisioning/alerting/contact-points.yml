@@ -1,0 +1,75 @@
+# 告警的「送到哪裡」(contact points)
+#
+# 重要：告警**不需要**設定這裡就會運作。所有規則一律會在 Grafana 的
+# Alerting → Alert rules 頁面、以及「MQ 積壓與 Worker 消化」儀表板上的
+# 〈目前告警〉面板亮起。這個檔案只決定要不要「主動推播出去」。
+#
+# 預設走 e-mail。Grafana 沒設定 SMTP 時寄不出去(log 會出現一行送信失敗)，
+# 但告警狀態完全不受影響。要真的收到信,在專案根目錄放一個 .env:
+#
+#     GF_SMTP_ENABLED=true
+#     GF_SMTP_HOST=smtp.gmail.com:587
+#     GF_SMTP_USER=you@gmail.com
+#     GF_SMTP_PASSWORD=<app password>
+#     GF_SMTP_FROM_ADDRESS=you@gmail.com
+#
+# 然後把下面的收件人改成你的信箱,再 `docker compose restart grafana`。
+#
+# 想改用 Slack / Teams / 自訂 webhook:把下面被註解掉的區塊解開、填上網址,
+# 並把 notification-policies.yml 裡的 receiver 名稱換成對應的 contact point。
+#
+# 注意:Grafana 的告警 provisioning **不會**展開環境變數(${VAR} 會被當成字面字串),
+# 所以這裡的值必須直接寫死。也因為是 provisioning 進來的,UI 上是唯讀的 —
+# 要改就改這個檔案再重啟 Grafana。
+apiVersion: 1
+
+contactPoints:
+  # 一般嚴重度(warning)走這裡
+  - orgId: 1
+    name: factory-iot-default
+    receivers:
+      - uid: factory-iot-default-email
+        type: email
+        settings:
+          addresses: ops@factory.local
+          singleEmail: true
+        disableResolveMessage: false
+
+  # critical 走這裡。獨立一個 contact point,之後想把重大告警改推 Slack、
+  # 一般告警留在信箱時,只要改這一塊就好。
+  - orgId: 1
+    name: factory-iot-critical
+    receivers:
+      - uid: factory-iot-critical-email
+        type: email
+        settings:
+          addresses: ops@factory.local
+          singleEmail: true
+          subject: '[🔴 CRITICAL] {{ .CommonLabels.alertname }}'
+        disableResolveMessage: false
+
+  # ── 想改推 Slack,把下面解開並填入 Incoming Webhook URL ──────────────────
+  # - orgId: 1
+  #   name: factory-iot-slack
+  #   receivers:
+  #     - uid: factory-iot-slack-webhook
+  #       type: slack
+  #       settings:
+  #         url: https://hooks.slack.com/services/XXX/YYY/ZZZ
+  #         title: '{{ .CommonLabels.severity | toUpper }} · {{ .CommonLabels.alertname }}'
+  #         text: |
+  #           {{ range .Alerts }}{{ .Annotations.summary }}
+  #           {{ .Annotations.description }}
+  #           {{ end }}
+  #       disableResolveMessage: false
+
+  # ── 想打自家的 webhook(例如轉進 LINE Notify / 自建通報服務)────────────
+  # - orgId: 1
+  #   name: factory-iot-webhook
+  #   receivers:
+  #     - uid: factory-iot-generic-webhook
+  #       type: webhook
+  #       settings:
+  #         url: http://your-service:8080/alerts
+  #         httpMethod: POST
+  #       disableResolveMessage: false

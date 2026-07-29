@@ -13,7 +13,7 @@
 3. [服務清單與存取資訊](#3-服務清單與存取資訊)
 4. [啟動後驗證（Health Check）](#4-啟動後驗證health-check)
 5. [常用操作](#5-常用操作)
-6. [設定 Grafana 監控](#6-設定-grafana-監控)
+6. [Grafana 監控與告警](#6-grafana-監控與告警)
 7. [執行 k6 壓力測試](#7-執行-k6-壓力測試)
 8. [查詢資料庫](#8-查詢資料庫)
 9. [故障排除](#9-故障排除)
@@ -79,10 +79,11 @@ docker compose ps
 | Backend API — Swagger（開發用） | http://localhost:8080/swagger | — | — |
 | Backend API — Metrics | http://localhost:8080/metrics | — | — |
 | RabbitMQ 管理 UI | http://localhost:15672 | `guest` | `guest` |
+| RabbitMQ — Metrics（含佇列積壓） | http://localhost:15692/metrics | — | — |
 | SQL Server | `localhost,1433` | `sa` | `IoT_Secret123!` |
 | Redis（分析讀取快取） | `localhost:6379` | — | — |
 | Prometheus | http://localhost:9090 | — | — |
-| Grafana | http://localhost:3000 | `admin` | `admin` |
+| Grafana（儀表板與告警已預先設定） | http://localhost:3000 | `admin` | `admin` |
 
 > ⚠️ 以上帳密僅供本機開發用，**切勿用於正式環境**。
 
@@ -175,9 +176,21 @@ curl "http://localhost:8080/api/v1/fleet/status?windowMinutes=5"
 
 ### 4.5 佇列有沒有積壓
 
-打開 RabbitMQ 管理 UI（http://localhost:15672）→ Queues → `telemetry-queue`：
+最快的方式是看 Grafana 的〈① MQ 積壓與 Worker 消化〉（http://localhost:3000）：
+「佇列積壓 (Ready)」接近 0、「Worker 消費者數」≥ 1 就對了。
+
+也可以直接問 broker：
+
+```bash
+curl -s http://localhost:15692/metrics | grep -E 'rabbitmq_queue_(messages_ready|consumers)\{'
+# rabbitmq_queue_messages_ready{vhost="/",queue="telemetry-queue"} 0     ← 積壓
+# rabbitmq_queue_consumers{vhost="/",queue="telemetry-queue"} 1          ← 有人在消化
+```
+
+或用 RabbitMQ 管理 UI（http://localhost:15672）→ Queues → `telemetry-queue`：
 
 - **Ready** 應接近 0（訊息被即時消費）
+- **Consumers** 必須 ≥ 1，是 0 就代表沒人在消化
 - **Total** 上下波動屬正常；持續單向暴增代表消費端跟不上 → 見故障排除。
 
 ---
@@ -228,35 +241,68 @@ docker compose start simulator
 
 ---
 
-## 6. 設定 Grafana 監控
+## 6. Grafana 監控與告警
 
-### 6.1 新增 Prometheus 資料來源
+**不需要任何手動設定。** 資料來源、儀表板、告警規則都由 `grafana/` 底下的檔案自動
+provisioning 進去，`docker compose up -d` 之後就已經在那裡了。
 
-1. 開啟 http://localhost:3000，登入（`admin` / `admin`，首次會要求改密碼，可略過）。
-2. 左側 **Connections → Data sources → Add data source**。
-3. 選 **Prometheus**。
-4. **URL** 填 `http://prometheus:9090`（注意：是容器名稱 `prometheus`，不是 `localhost`）。
-5. 按 **Save & Test**，看到綠色成功訊息即可。
+打開 http://localhost:3000（`admin` / `admin`），登入後**直接就是**
+〈① MQ 積壓與 Worker 消化〉。
 
-### 6.2 建議的儀表板查詢（PromQL）
+### 6.1 出事先看這四個數字
 
-新增 Dashboard → 加 Panel，填入以下查詢：
+儀表板最上面那排：
 
-| 面板 | PromQL |
-|------|--------|
-| 訊息消費速率（筆/秒） | `rate(telemetry_consumed_total[1m])` |
-| 資料庫寫入速率（筆/秒） | `rate(telemetry_written_total[1m])` |
-| 寫入失敗速率 | `rate(telemetry_failed_total[1m])` |
-| 批次寫入 P95 延遲 | `histogram_quantile(0.95, rate(telemetry_batch_processing_seconds_bucket[5m]))` |
-| API 請求速率 | `rate(http_requests_received_total[1m])` |
-| API P95 延遲 | `histogram_quantile(0.95, rate(http_request_duration_seconds_bucket[5m]))` |
-| 記憶體緩衝深度 | `telemetry_channel_depth` |
+| 方塊 | 正常長相 | 不正常代表什麼 |
+|------|----------|----------------|
+| **佇列積壓 (Ready)** | 接近 0，綠色 | 一路往上 = MQ 在累積 |
+| **處理中 (Unacked)** | 0～500 之間浮動 | 貼死在 500 = Worker 收了卻卡住 |
+| **Worker 消費者數** | ≥ 1，綠色 | **0 = Worker 根本沒接上，只進不出** |
+| **Worker 健康狀態** | 綠底「正常」 | 紅底「異常」= 沒連上 MQ 或批次處理停擺 |
+
+### 6.2 三張儀表板
+
+| 儀表板 | 看什麼 |
+|--------|--------|
+| ① MQ 積壓與 Worker 消化 | 佇列積壓、消費者數、發布 vs 消化 vs 入庫、瓶頸在哪一段 |
+| ② RabbitMQ Broker 健康 | 連線 / 資源水位警報 / 各佇列明細 / 節點資源 |
+| ③ API 與資料庫寫入 | REST API 延遲與錯誤率、批次寫入效能 |
+
+> 健康的系統：〈發布 vs 消化 vs 入庫〉三條線幾乎重疊（50 台機台 × 每秒 1 筆 ≈ 50 筆/秒），
+> 積壓貼著 0，失敗速率恆為 0。哪兩條線分岔，瓶頸就在那一段。
+
+### 6.3 告警
+
+19 條規則已經在跑，燒起來時會顯示在第一張儀表板的〈🔔 目前告警〉面板，
+以及 **Alerting → Alert rules**。跟積壓最直接相關的：
+
+- 🔴 **佇列沒有任何消費者**（2 分鐘）
+- 🔴 **有積壓但完全沒有消化**（3 分鐘）
+- 🔴 **Worker 不健康**（2 分鐘）
+- 🟠 **MQ 積壓警戒 / 嚴重**（> 1000 / > 10000，5 分鐘）
+
+每條告警都附有具體的處理步驟（`runbook` 標註）。
+
+> 📖 完整的儀表板導覽、19 條規則條件、門檻怎麼調、通知怎麼接 Slack／Email、
+> 以及「把積壓做出來看告警燒起來」的演練步驟，全部在
+> **[監控與告警手冊 MONITORING.md](./MONITORING.md)**。
+
+### 6.4 儲存生命週期指標（尚未進儀表板）
+
+三張儀表板涵蓋的是「攝取管線」。儲存分層那條線（預聚合、保留期清理）目前還沒有對應面板，
+要看得自己在 Grafana 開 Explore 查：
+
+| 想知道什麼 | PromQL |
+|------------|--------|
 | 聚合落後秒數 | `telemetry_rollup_lag_seconds` |
+| 已建立的時間桶數 | `rate(telemetry_rollup_buckets_total[5m])` |
 | 保留期清理速率（列/秒） | `rate(telemetry_rows_purged_total[5m])` |
+| 記憶體緩衝深度 | `telemetry_worker_buffer_depth` |
 
-> 健康的系統：消費速率 ≈ 寫入速率（在 50 台機台 × 每秒 1 筆的情境下，約 50 筆/秒），失敗速率恆為 0。
->
-> 另外兩條值得設告警：`telemetry_channel_depth` 持續偏高代表資料庫寫入跟不上；`telemetry_rollup_lag_seconds{granularity="Minute"}` 持續攀升（正常在 120～180 秒）代表聚合跟不上攝取 —— 此時保留期清理會自動停止以免刪掉還沒被聚合的原始資料，資料庫會開始長大。見 [DATA-LIFECYCLE.md](./DATA-LIFECYCLE.md)。
+> 這兩條值得自己補上告警：`telemetry_worker_buffer_depth` 持續偏高代表資料庫寫入跟不上；
+> `telemetry_rollup_lag_seconds{granularity="Minute"}` 持續攀升（正常在 120～180 秒）代表聚合跟不上攝取
+> —— 此時保留期清理會自動停止以免刪掉還沒被聚合的原始資料，資料庫會開始長大。
+> 見 [DATA-LIFECYCLE.md](./DATA-LIFECYCLE.md)。
 
 ---
 
@@ -365,12 +411,24 @@ docker compose ps mssql
 
 ### 問題 3：訊息積壓在 RabbitMQ
 
-**症狀**：管理 UI 中 `telemetry-queue` 的 **Ready** 數持續攀升。
+**症狀**：`telemetry-queue` 的 **Ready** 數持續攀升；Grafana 上「MQ 積壓警戒」燒起來。
+
+**先用這張表定位根因**（數字都在〈① MQ 積壓與 Worker 消化〉上）：
+
+| Ready 積壓 | Unacked | 消費者數 | 內部緩衝 | 診斷 |
+|-----------|---------|---------|---------|------|
+| ⬆ 上升 | 0 | **0** | 0 | Worker 沒接上 MQ → 看 `backend-api` 容器與 log |
+| ⬆ 上升 | 貼著 500 | ≥1 | 0 | consumer 收得到但處理不完 → 卡在下游 |
+| ⬆ 上升 | 正常浮動 | ≥1 | ⬆ 上升 | **資料庫寫不進去** → 資料堆在記憶體，**別重啟容器** |
+| 平穩偏高 | 正常 | ≥1 | 0 | 容量不足，消化長期略慢於發布 |
 
 **檢查與解法**：
-- 確認 `backend-api` 容器在跑、Worker 健康（`/health/worker`）。
-- 看是否 DB 成為瓶頸（批次寫入延遲 `telemetry_batch_processing_seconds` 變大）。
+- 確認 `backend-api` 容器在跑、Worker 健康（`curl http://localhost:8080/health/worker`）。
+- 看是否 DB 成為瓶頸（〈批次寫入延遲〉P95 逼近 2 秒的虛線）。
+- 看〈訊息重送〉是不是一直有值 —— 那代表有訊息每次都處理失敗被 requeue，會空轉佔用量能。
 - 若只是想清掉積壓，可在管理 UI 對佇列做 Purge（**會遺失未消費資料，請謹慎**）。
+
+> 📖 完整判讀方式見 [MONITORING.md §8 判讀速查表](./MONITORING.md#8-判讀速查表看到這個現象--代表什麼)。
 
 ### 問題 4：某埠被占用 / 容器起不來
 
@@ -421,6 +479,11 @@ docker compose down -v
 | RabbitMQ prefetch | 500 | `RabbitMqTelemetryConsumer` — `PrefetchCount` |
 | 佇列名稱 | `telemetry-queue`（durable） | `RabbitMqTelemetryConsumer` / `Simulator` |
 | Prometheus 抓取間隔 | 15 秒 | `prometheus.yml` |
+| Prometheus 抓取目標 | `backend-api:8080`、`rabbitmq:15692` | `prometheus.yml` |
+| RabbitMQ 每佇列指標 | 開啟（`return_per_object_metrics`） | `rabbitmq.conf` |
+| 告警評估間隔 | 60 秒 | `grafana/provisioning/alerting/rules-*.yml` |
+| 積壓告警門檻 | 1000（warning）／10000（critical） | `grafana/provisioning/alerting/rules-mq-backlog.yml` |
+| 儀表板重新載入間隔 | 30 秒 | `grafana/provisioning/dashboards/dashboards.yml` |
 
 ### 用環境變數覆寫連線設定（docker-compose.yml）
 
